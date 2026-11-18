@@ -1,7 +1,7 @@
 # Adoption templates
 
 Copy-paste-ready files for adding the [Changesets release setup](../docs/CHANGESETS.md) to a
-neolution-ch repository. Copy the contents of this `templates/` folder **into your repository root**,
+collana-solutions repository. Copy the contents of this `templates/` folder **into your repository root**,
 then customize the few spots marked below.
 
 These templates target **Changesets v3** (`@changesets/cli@^3`, `@changesets/changelog-github@^1`)
@@ -34,7 +34,7 @@ Do **not** copy this `README.md`.
 
 | File                            | Change                                                                                                                                                                                                                                                                                                                                                                       |
 | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `.changeset/config.json`        | Set `changelog[1].repo` to `neolution-ch/<your-repo>`. Set the `fixed` array to your package group (or `[]` if you don't group packages — see note). For **public npm**, set `access` to `"public"`. If your packages are `"private": true` (e.g. a NuGet repo), add `"privatePackages": { "version": true, "tag": true }` — Changesets v3 skips private packages otherwise. |
+| `.changeset/config.json`        | Set `changelog[1].repo` to `collana-solutions/<your-repo>`. Set the `fixed` array to your package group (or `[]` if you don't group packages — see note). For **public npm**, set `access` to `"public"`. If your packages are `"private": true` (e.g. a NuGet repo), add `"privatePackages": { "version": true, "tag": true }` — Changesets v3 skips private packages otherwise. |
 | `.npmrc`                        | Keep for GitHub Packages under the `@neolution-ch` scope. For **public npm**, remove it (or point it at `registry.npmjs.org`) — it overrides the workflow's registry otherwise.                                                                                                                                                                                              |
 | `.github/dependabot.yml`        | Adjust `directories`/ecosystems to your layout. Remove `/packages/*` for a single-package repo.                                                                                                                                                                                                                                                                              |
 | `.github/workflows/release.yml` | For **public npm**: set `registry-url` to `https://registry.npmjs.org`, `NODE_AUTH_TOKEN` to `${{ secrets.NPM_TOKEN }}`, replace the `packages: write` permission with `id-token: write`, and append `--provenance` to the publish command. For **NuGet**: drop `packages: write`, `registry-url` and `NODE_AUTH_TOKEN`, and add the `version-script` from [Adapting for NuGet Packages](../docs/CHANGESETS.md#version-sync-script). |
@@ -71,7 +71,7 @@ values — Dependabot has a separate secret store):
 - `CHANGESETS_BOT_CLIENT_ID`
 - `CHANGESETS_BOT_PRIVATE_KEY`
 
-> These names must match whatever your org actually configured. If neolution-ch already created
+> These names must match whatever your org actually configured. If collana-solutions already created
 > org-level secrets under a different name, either reuse that name here or rename the secrets — the
 > workflow references and the secret names have to agree.
 
