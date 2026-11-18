@@ -1,7 +1,7 @@
 # release-playbook
 
 The canonical **[Changesets](https://changesets.dev) release guide** for
-neolution-ch, plus copy-paste templates for adopting it in any repository.
+collana-solutions, plus copy-paste templates for adopting it in any repository.
 
 Targets **Changesets v3** (`@changesets/cli@^3`) with **`changesets/action@v2`**, which needs
 Node.js `^22.11 || ^24 || >=26`.

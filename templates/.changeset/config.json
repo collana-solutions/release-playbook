@@ -2,7 +2,7 @@
   "$schema": "https://unpkg.com/@changesets/config@4.0.0/schema.json",
   "changelog": [
     "@changesets/changelog-github",
-    { "repo": "neolution-ch/YOUR-REPO" }
+    { "repo": "collana-solutions/YOUR-REPO" }
   ],
   "commit": false,
   "fixed": [["@neolution-ch/pkg-a", "@neolution-ch/pkg-b"]],

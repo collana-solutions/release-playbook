@@ -1,6 +1,6 @@
 ﻿# Changesets Guide
 
-This is the neolution-ch guide for working with changesets. It covers **every scenario** for both **contributors** (who add changes) and **maintainers** (who manage releases), and how to adopt the setup in a new repository.
+This is the collana-solutions guide for working with changesets. It covers **every scenario** for both **contributors** (who add changes) and **maintainers** (who manage releases), and how to adopt the setup in a new repository.
 
 ---
 
@@ -82,7 +82,7 @@ This is the neolution-ch guide for working with changesets. It covers **every sc
 
 ## Overview
 
-This is the neolution-ch standard for managing versioning and changelogs with [Changesets](https://changesets.dev). It applies to any repo that publishes one or more npm packages. The examples below use two illustrative packages — `@neolution-ch/pkg-a` and `@neolution-ch/pkg-b` — configured as a **fixed** group. Substitute your own package names.
+This is the collana-solutions standard for managing versioning and changelogs with [Changesets](https://changesets.dev). It applies to any repo that publishes one or more npm packages. The examples below use two illustrative packages — `@neolution-ch/pkg-a` and `@neolution-ch/pkg-b` — configured as a **fixed** group. Substitute your own package names.
 
 | Package (example)     | Path             |
 | --------------------- | ---------------- |
@@ -780,7 +780,7 @@ Everything else is registry-agnostic: the CI changeset gate, the Version Package
 
 Changesets is an npm tool, but it can manage versioning and changelogs for .NET (NuGet) packages with a thin bridge. The key insight: let changesets handle what it's good at (changeset files, CI checks, changelogs, GitHub Releases) and use a separate workflow for the actual NuGet publish.
 
-Changesets supports this officially — see [Beyond npm](https://changesets.dev/guide/beyond-npm), which names NuGet explicitly, and the [Publish Git Tags Only](https://changesets.dev/guide/automating) recipe. The setup below is that pattern with the neolution-ch workflows wired in.
+Changesets supports this officially — see [Beyond npm](https://changesets.dev/guide/beyond-npm), which names NuGet explicitly, and the [Publish Git Tags Only](https://changesets.dev/guide/automating) recipe. The setup below is that pattern with the collana-solutions workflows wired in.
 
 ### Architecture
 
@@ -1158,7 +1158,7 @@ This prompts for the changelog generator, commit behavior, publish access, and b
   "$schema": "https://unpkg.com/@changesets/config@4.0.0/schema.json",
   "changelog": [
     "@changesets/changelog-github",
-    { "repo": "neolution-ch/your-repo" }
+    { "repo": "collana-solutions/your-repo" }
   ],
   "commit": false,
   "fixed": [],
@@ -1203,7 +1203,7 @@ Add `.npmrc` if using GitHub Packages:
 
 The Release workflow uses a GitHub App token so that Version Packages PRs trigger CI. This is a one-time org-level setup:
 
-1. Create a GitHub App at `https://github.com/organizations/neolution-ch/settings/apps`
+1. Create a GitHub App at `https://github.com/organizations/collana-solutions/settings/apps`
    - **Permissions:** Contents (Read & write), Pull requests (Read & write)
    - **Webhook:** Disabled
 2. Generate a private key and note the App ID
