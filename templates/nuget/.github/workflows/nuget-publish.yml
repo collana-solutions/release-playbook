@@ -1,0 +1,184 @@
+name: NuGet Publish
+
+# Pushes the packages to nuget.org through trusted publishing, so no API key is stored.
+# The nuget.org policy trusts this repository, this workflow file and the `production`
+# environment (see "Adapting for NuGet Packages" in the release playbook).
+#
+# The work is split into two jobs. `pack` restores, builds, tests and packs without any
+# credential, and uploads the packages as an artifact. `publish` is the only job that can
+# request an OIDC token. It checks nothing out, builds nothing and only pushes the packages
+# it downloads. Restore and build run MSBuild targets, analyzers and source generators that
+# come from NuGet packages, so code from the dependency tree never runs next to the push key.
+#
+# CUSTOMIZE: every spot marked below names the anchor package. One package of the fixed
+# group is the anchor: its GitHub Release runs this workflow, which packs and pushes
+# all packages. With a single package, that package is the anchor.
+on:
+  release:
+    types: [published]
+  # Publishes an existing release again, for example after a failed push. A re-run of a release run uses the
+  # workflow as it was at the release tag. A dispatch from main uses this file and checks out the tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        # CUSTOMIZE: the anchor package's release tag.
+        description: Release tag of the anchor package, for example @collana-solutions/YOUR-ANCHOR-PACKAGE@1.2.3
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  pack:
+    name: Pack
+    # A fixed group produces one GitHub Release per package for the same version. Only the anchor
+    # package's release runs this job, and it packs every package. A package outside the anchor's
+    # group would never be published, so .changeset/config.json has exactly one fixed group, which
+    # holds every packed project (or the single package), and the anchor is one of them. The publish
+    # job needs this one, so it is skipped together with it.
+    # CUSTOMIZE: the anchor package's changeset name.
+    if: startsWith(inputs.tag || github.event.release.tag_name, '@collana-solutions/YOUR-ANCHOR-PACKAGE@')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+          persist-credentials: false
+
+      # global.json pins the SDK. Add `dotnet-version` (for example 8.x) when a test project
+      # targets a runtime that SDK does not bring.
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Extract version from tag
+        id: version
+        env:
+          TAG: ${{ inputs.tag || github.event.release.tag_name }}
+        run: |
+          # Tag format: @collana-solutions/YOUR-ANCHOR-PACKAGE@1.2.3
+          echo "version=${TAG##*@}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore
+        run: dotnet restore --locked-mode
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test --configuration Release --no-build
+
+      # Packs every project that does not set <IsPackable>false</IsPackable>. Test projects set it through the test SDK.
+      - name: Pack
+        run: dotnet pack --configuration Release --no-build -o ./nupkgs
+
+      # The version comes from the .csproj files, which scripts/sync-versions.mjs sets in the version PR, so
+      # this fails when the tag and the projects disagree. Every package has to carry the release version,
+      # because --skip-duplicate would skip a package that kept an older one and leave the new version
+      # unpublished. The package.json files exist for changesets only, so no package may contain one.
+      # Every directory that holds a package.json with a version and a .csproj is a project changesets has
+      # just tagged, so each of them has to produce a package. A project that is missing from the solution
+      # or not packable would otherwise leave its tagged version unpublished.
+      # CUSTOMIZE: ANCHOR, the anchor package's NuGet ID.
+      - name: Verify packages
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          ANCHOR: YOUR.ANCHOR.PACKAGE.ID
+        run: |
+          shopt -s nullglob
+          packages=(./nupkgs/*.nupkg)
+          if [ "${#packages[@]}" -eq 0 ]; then
+            echo "::error::dotnet pack produced no .nupkg in ./nupkgs"
+            exit 1
+          fi
+          failed=0
+          for package in "${packages[@]}"; do
+            name=$(basename "$package")
+            echo "$name"
+            if [[ "$name" != *".${VERSION}.nupkg" ]]; then
+              echo "::error::$name does not carry the release version ${VERSION}"
+              failed=1
+            fi
+            if unzip -l "$package" | grep -qE '[ /]package\.json$'; then
+              echo "::error::$name contains a package.json"
+              failed=1
+            fi
+          done
+          if [ ! -f "./nupkgs/${ANCHOR}.${VERSION}.nupkg" ]; then
+            echo "::error::The anchor package ${ANCHOR}.${VERSION}.nupkg is missing"
+            failed=1
+          fi
+          projects=()
+          while IFS= read -r manifest; do
+            dir=$(dirname "$manifest")
+            csprojs=("$dir"/*.csproj)
+            if [ "$dir" != . ] && [ "${#csprojs[@]}" -gt 0 ] && [ -n "$(jq -r '.version // empty' "$manifest")" ]; then
+              projects+=("$dir")
+            fi
+          done < <(find . -name package.json -not -path "*/node_modules/*" | sort)
+          if [ "${#packages[@]}" -ne "${#projects[@]}" ]; then
+            echo "::error::dotnet pack produced ${#packages[@]} packages for ${#projects[@]} versioned projects"
+            echo "Versioned projects:"
+            printf '  %s\n' "${projects[@]}"
+            echo "Packages:"
+            printf '  %s\n' "${packages[@]##*/}"
+            failed=1
+          fi
+          exit "$failed"
+
+      - name: Upload packages
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nupkgs
+          path: |
+            ./nupkgs/*.nupkg
+            ./nupkgs/*.snupkg
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: Publish to nuget.org
+    needs: pack
+    runs-on: ubuntu-latest
+    # The group is on the job, so a skipped release of another package never enters it, and every
+    # release tag has its own group, so no release can replace the pending run of another version.
+    # Runs for the same tag wait for each other, and pushes use --skip-duplicate, so a second run for
+    # the same version pushes nothing.
+    concurrency:
+      group: nuget-publish-${{ inputs.tag || github.event.release.tag_name }}
+      cancel-in-progress: false
+    # nuget.org's trusted publishing policy for these packages names this environment, and the OIDC token
+    # carries it, so only this job can obtain a push key.
+    environment: production
+    # Downloading an artifact of the same run needs no GITHUB_TOKEN permission.
+    permissions:
+      id-token: write
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nupkgs
+          path: ./nupkgs
+
+      # The key nuget.org returns is valid for one hour, so it is requested only once the packages are built.
+      # NUGET_USER is the nuget.org profile name of the member of collana-solutions who owns the policy.
+      - name: Log in to nuget.org
+        id: nuget-login
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+        with:
+          user: ${{ vars.NUGET_USER }}
+
+      # The runner image brings a .NET SDK, which is all dotnet nuget push needs, so this job installs none.
+      # Each .snupkg next to its .nupkg goes to the nuget.org symbol server with the same key.
+      - name: Push to nuget.org
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+        run: |
+          dotnet nuget push "./nupkgs/*.nupkg" \
+            --api-key "$NUGET_API_KEY" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate

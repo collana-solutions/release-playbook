@@ -1,0 +1,18 @@
+# CUSTOMIZE: the directories of the published packages.
+packages:
+  - 'packages/*'
+
+# Dependencies allowed to run install or build scripts. Everything else is blocked.
+# CUSTOMIZE: list only what the build needs, for example:
+# allowBuilds:
+#   esbuild: true
+
+# Reject package versions published less than 14 days ago (14 * 24 * 60 = 20160 minutes).
+# Mitigates supply-chain attacks by giving freshly published (potentially malicious) versions
+# time to be detected and pulled before they can be installed.
+minimumReleaseAge: 20160
+
+# Fail the install rather than silently recording an exception. Without this, pnpm appends
+# offending versions to minimumReleaseAgeExclude by itself, which would let the scheduled
+# Refresh lockfiles job quietly bypass the policy it is supposed to respect.
+minimumReleaseAgeStrict: true

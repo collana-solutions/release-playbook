@@ -1,83 +1,111 @@
 # Adoption templates
 
 Copy-paste-ready files for adding the [Changesets release setup](../docs/CHANGESETS.md) to a
-collana-solutions repository. Copy the contents of this `templates/` folder **into your repository root**,
-then customize the few spots marked below.
+collana-solutions repository, in two variants:
 
-These templates target **Changesets v3** (`@changesets/cli@^3`, `@changesets/changelog-github@^1`)
-and **`changesets/action@v2`**. Changesets v3 requires Node.js `^22.11 || ^24 || >=26` and
-npm `>=10.9.0` (pnpm `>=10.0.0`, Yarn `>=4.5.2`).
+| Variant              | For                                    | Publishes to | Built from                                                                                                                                                                     |
+| -------------------- | -------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [`npm/`](npm/)       | npm packages in a pnpm workspace       | npmjs.com    | [csag-blueprint-react](https://github.com/collana-solutions/csag-blueprint-react)                                                                                              |
+| [`nuget/`](nuget/)   | .NET packages, versioned by changesets | nuget.org    | [Csag.Blueprint](https://github.com/collana-solutions/Csag.Blueprint) (multi-package) and [Csag.WorkloadIdentity](https://github.com/collana-solutions/Csag.WorkloadIdentity) |
 
-Your `package-lock.json` must be committed. Changesets v3 recognizes an npm workspace only when the
-repo root has both a `workspaces` field and a lockfile; without it the repo is treated as one
-package and `changeset` reports "No versionable packages found".
+Both publish through trusted publishing, so no registry token is stored. Both use pnpm 11
+(`"packageManager": "pnpm@11.22.0"`), **Changesets v3** (`@changesets/cli@^3`,
+`@changesets/changelog-github@^1`) and **`changesets/action@v2`**, which need Node.js
+`^22.11 || ^24 || >=26`.
 
-> These files live under `templates/` (not the repo's real `.github/`) so that this playbook repo
-> doesn't run them. When you copy them into an adopting repo, they land in their normal locations
-> (`.github/workflows/…`, `.changeset/…`, `scripts/…`).
+Copy the contents of **one** variant folder into the repository root. The files land in their
+normal locations (`.github/workflows/…`, `.changeset/…`, `scripts/…`). They live under `templates/`
+so that this playbook repo does not run them. Do **not** copy this `README.md`.
 
-## What to copy
+## Files
 
 ```
-templates/.github/workflows/ci.yml                  → .github/workflows/ci.yml
-templates/.github/workflows/release.yml             → .github/workflows/release.yml
-templates/.github/workflows/dependabot-changeset.yml→ .github/workflows/dependabot-changeset.yml
-templates/.github/dependabot.yml                    → .github/dependabot.yml
-templates/.changeset/config.json                    → .changeset/config.json
-templates/scripts/generate-dependabot-changeset.mjs → scripts/generate-dependabot-changeset.mjs
-templates/.npmrc                                     → .npmrc
+npm/                                         nuget/
+├── .changeset/config.json                   ├── .changeset/config.json
+├── .github/                                 ├── .github/
+│   ├── dependabot.yml                       │   ├── dependabot.yml
+│   └── workflows/                           │   └── workflows/
+│       ├── ci.yml                           │       ├── ci.yml
+│       ├── dependabot-changeset.yml         │       ├── dependabot-changeset.yml
+│       ├── pkg.pr.new.yml                   │       ├── nuget-dependency-submission.yml
+│       ├── refresh-lockfiles.yml            │       ├── nuget-preview.yml
+│       └── release.yml                      │       ├── nuget-publish.yml
+├── .npmrc                                   │       ├── refresh-lockfiles.yml
+├── package.json                             │       └── release.yml
+├── pnpm-workspace.yaml                      ├── package.json
+└── scripts/                                 ├── pnpm-workspace.yaml
+    └── generate-dependabot-changeset.mjs    └── scripts/
+                                                 ├── build-dependency-snapshot.mjs
+                                                 ├── generate-dependabot-changeset.mjs
+                                                 └── sync-versions.mjs
 ```
 
-Do **not** copy this `README.md`.
+`package.json` holds what the release setup needs in the root manifest. Merge it into an existing
+root `package.json` instead of replacing it.
 
 ## What you must customize
 
-| File                            | Change                                                                                                                                                                                                                                                                                                                                                                       |
-| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `.changeset/config.json`        | Set `changelog[1].repo` to `collana-solutions/<your-repo>`. Set the `fixed` array to your package group (or `[]` if you don't group packages — see note). For **public npm**, set `access` to `"public"`. If your packages are `"private": true` (e.g. a NuGet repo), add `"privatePackages": { "version": true, "tag": true }` — Changesets v3 skips private packages otherwise. |
-| `.npmrc`                        | Keep for GitHub Packages under the `@neolution-ch` scope. For **public npm**, remove it (or point it at `registry.npmjs.org`) — it overrides the workflow's registry otherwise.                                                                                                                                                                                              |
-| `.github/dependabot.yml`        | Adjust `directories`/ecosystems to your layout. Remove `/packages/*` for a single-package repo.                                                                                                                                                                                                                                                                              |
-| `.github/workflows/release.yml` | For **public npm**: set `registry-url` to `https://registry.npmjs.org`, `NODE_AUTH_TOKEN` to `${{ secrets.NPM_TOKEN }}`, replace the `packages: write` permission with `id-token: write`, and append `--provenance` to the publish command. For **NuGet**: drop `packages: write`, `registry-url` and `NODE_AUTH_TOKEN`, and add the `version-script` from [Adapting for NuGet Packages](../docs/CHANGESETS.md#version-sync-script). |
-| `.github/workflows/ci.yml`      | The **Check for changesets** step is skipped only for Version Packages PRs opened by `csag-changesets-bot[bot]`. If your GitHub App has a different name, use its bot login there.                                                                                                                                                                                          |
-| `.github/workflows/dependabot-changeset.yml` | For **NuGet**, replace the detect step so it watches the `.csproj` files, see [Dependabot changesets for NuGet](../docs/CHANGESETS.md#dependabot-changesets-for-nuget).                                                                                                                                                                              |
+Every spot that needs a change is marked with a `CUSTOMIZE` comment or a `YOUR-…` placeholder.
+`grep -rn "CUSTOMIZE\|YOUR" .` after copying finds them all. JSON files cannot carry comments, so
+their placeholders are listed here.
 
-## Using pnpm
+### Both variants
 
-The templates use npm. For a pnpm repo, pin pnpm in the root `package.json`
-(`"packageManager": "pnpm@11.22.0"`) and change every workflow that installs dependencies:
+| File                                         | Change                                                                                                                                                                                             |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.changeset/config.json`                     | `collana-solutions/YOUR-REPO` → the repository. The `fixed` array → the repo's packages. A single package goes into a one-element group (`[["@collana-solutions/my-pkg"]]`), see below.            |
+| `package.json`                               | `YOUR-REPO` → a name for the root manifest, for example the repository name in lowercase.                                                                                                         |
+| `pnpm-workspace.yaml`                        | `packages` → the directories of the published packages (npm) or of the packed projects (NuGet).                                                                                                   |
+| `.github/workflows/dependabot-changeset.yml` | The path in the detect step → the same directories.                                                                                                                                               |
+| `.github/dependabot.yml`                     | npm: `directories` → the root and the package directories. NuGet: the `ignore` list for packages whose major version is held back on purpose.                                                    |
+| `.github/workflows/ci.yml`                   | The **Check for changesets** step skips only Version Packages PRs opened by `csag-changesets-bot[bot]`. Keep the job names, because the branch ruleset requires them.                            |
 
-- add an **Enable Corepack** step (`run: corepack enable`) right after **Setup Node.js**
-- `npm ci` → `pnpm install --frozen-lockfile`
-- `npx changeset …` → `pnpm exec changeset …`
+### npm
 
-pnpm blocks dependency build scripts by default. List the ones you need under `allowBuilds` in
-`pnpm-workspace.yaml`. If a package sets `publishConfig.registry` or a scope registry, move it to
-`.npmrc` as well (see the pnpm note in
-[Publishing to public npm](../docs/CHANGESETS.md#publishing-to-public-npm)).
+| File                                  | Change                                                                                                                                                                           |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.github/workflows/ci.yml`            | The steps of the **Verify** job after **Install Dependencies** are placeholders. Replace them with the repo's own checks.                                                        |
+| `.github/workflows/release.yml`       | The **Build** steps of `pack` and `backport` run the root `build` script, which has to build every released package.                                                             |
+| `.github/workflows/pkg.pr.new.yml`    | The `./packages/*` glob → the directories of the published packages.                                                                                                             |
+| `pnpm-workspace.yaml`                 | `allowBuilds` → the dependencies whose install scripts the build needs, nothing else.                                                                                            |
+
+### NuGet
+
+| File                                      | Change                                                                                                                                                                                                                                                       |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `.changeset/config.json`                  | Exactly one fixed group, which holds every packed project (or the single package). NuGet Publish packs and pushes only for the anchor package's release, so a package outside that group is never published. `@collana-solutions/YOUR-ANCHOR-PACKAGE` → the changeset name of the anchor package, one of the packages in that group. With one package, that package. |
+| `.github/workflows/nuget-publish.yml`     | `@collana-solutions/YOUR-ANCHOR-PACKAGE` (the tag gate and the dispatch example) and `YOUR.ANCHOR.PACKAGE.ID` (`ANCHOR` in **Verify packages**, the NuGet ID of the anchor package).                                                                          |
+| `.github/workflows/nuget-preview.yml`     | `YOUR-FEED` → the feedz.io feed (the repository name in lowercase, dots as dashes). `YOUR-ANCHOR-PROJECT` → the anchor project's directory. `YOUR.PACKAGE.PREFIX.*` and `YOUR.ANCHOR.PACKAGE.ID` in the PR comment. The comment links to a "Preview packages" section of the README, so add one. |
+| `.github/workflows/refresh-lockfiles.yml` | The `packages/*/packages.lock.json` path in **Add changeset** → the lock files of the packed projects.                                                                                                                                                        |
+| `.github/workflows/ci.yml`                | **Test** uses the `GitHubActions` logger, which needs the `GitHubActionsTestLogger` package in every test project. Drop `--logger GitHubActions` otherwise. `YOUR-ANCHOR-PROJECT` in **Verify packed versions** → the anchor project's directory.                |
+| `Directory.Build.props`                   | Merge the [package metadata block](../docs/CHANGESETS.md#package-metadata) (project URL, symbols, Source Link, icon, `ContinuousIntegrationBuild`).                                                                                                          |
+
+The NuGet workflows expect a `global.json` that pins the .NET SDK, NuGet lock files
+(`RestorePackagesWithLockFile`), a single solution or project file at the repository root, and a
+private `package.json` next to every packed `.csproj`
+(see [Repository structure](../docs/CHANGESETS.md#repository-structure)).
 
 ## Action pins
 
-The templates pin actions to major versions (`actions/checkout@v7`). A repo that pins exact
-versions (`actions/checkout@v7.0.1`) can keep doing so: Dependabot keeps the precision of each ref
-when it updates it. `changesets/action@v2` is a branch, not a tag, so Dependabot never proposes
-updates for it. Pin an exact tag such as `@v2.1.2` if you want Dependabot to track it.
+Every action is pinned to a full commit SHA with its version as a comment
+(`actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`), as the
+[workflow security conventions](../docs/CHANGESETS.md#workflow-security-conventions) require. The
+pins are the ones of the reference repos at the time of copying. Dependabot updates them in the
+adopting repo after its 30-day cooldown.
 
-## Required secrets
+## Required secrets and settings
 
-The Release and Dependabot Changeset workflows authenticate as a GitHub App so their pushes/PRs
-re-trigger CI. Add these secrets (an **Actions** secret and a **Dependabot** secret with the same
-values — Dependabot has a separate secret store):
+The workflows authenticate as the `csag-changesets-bot` GitHub App, so their pushes and PRs start
+CI. Its secrets `CHANGESETS_BOT_CLIENT_ID` and `CHANGESETS_BOT_PRIVATE_KEY` exist at org level for
+Actions and for Dependabot. The NuGet variant also uses the org secret `FEEDZ_TOKEN` and the org
+variable `NUGET_USER`.
 
-- `CHANGESETS_BOT_CLIENT_ID`
-- `CHANGESETS_BOT_PRIVATE_KEY`
-
-> These names must match whatever your org actually configured. If collana-solutions already created
-> org-level secrets under a different name, either reuse that name here or rename the secrets — the
-> workflow references and the secret names have to agree.
+Everything else (the `production` environment, rulesets, the trust connection to the registry, the
+preview feed or App) is in the [Per-repo setup checklist](../docs/CHANGESETS.md#per-repo-setup-checklist).
 
 ## Single-package repos & no fixed group
 
 `scripts/generate-dependabot-changeset.mjs` bumps the configured `fixed` group. If you have a single
-package, put it in a one-element `fixed` group (e.g. `[["@neolution-ch/my-pkg"]]`) so Dependabot
+package, put it in a one-element `fixed` group (e.g. `[["@collana-solutions/my-pkg"]]`) so Dependabot
 updates get a real bump. The script **fails loudly** if a workspace package changed while no `fixed`
 group is configured, rather than silently emitting a no-op changeset.
