@@ -2,10 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
 
-// The package version has to come from <Version> alone. PackageVersion overrides it, so
-// dotnet pack would keep producing the old version while the tag carries the new one.
-// VersionPrefix and VersionSuffix only apply while <Version> is empty, so a project that
-// sets them expects a version this script does not produce.
+// The package version has to come from an unconditioned <Version> alone. PackageVersion
+// overrides it, so dotnet pack would keep producing the old version while the tag carries
+// the new one. VersionPrefix and VersionSuffix only apply while <Version> is empty, so a
+// project that sets them expects a version this script does not produce. A <Version> with
+// a Condition, on itself or on its PropertyGroup, is never updated here, and wherever the
+// condition holds (in Release, for example) it replaces the version this script sets.
 const versionOverrides = ["PackageVersion", "VersionPrefix", "VersionSuffix"];
 
 // Comments, CDATA sections, processing instructions and a DOCTYPE are matched as a
@@ -66,6 +68,11 @@ function setProjectVersion(content, version, file) {
       if (override) {
         throw new Error(
           `${file} sets <${property.name}>. The package version comes from <Version>, which this script sets from package.json, so remove <${property.name}>.`,
+        );
+      }
+      if (isNamed(property, "Version") && (group.conditioned || property.conditioned)) {
+        throw new Error(
+          `${file} sets <Version> under a Condition. Only an unconditioned <Version> is allowed, because this script sets that one from package.json, so remove the condition or the conditioned <Version>.`,
         );
       }
     }

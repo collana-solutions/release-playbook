@@ -662,7 +662,7 @@ All releases from `release/v1.x` go through the same automated flow: PR → CI c
 If a publish fails (network error, registry outage, a trust configuration that does not match the workflow):
 
 1. **Check what was published:** the package pages on npmjs.com or nuget.org, and the git tags and GitHub Releases of the repo.
-2. **npm:** re-run the failed Release run from the Actions tab. `select-mode` compares the `package.json` versions with npm again, so the publish plan contains only what is still missing.
+2. **npm:** re-run the failed Release run from the Actions tab. `select-mode` compares the `package.json` versions with npm again, so the publish plan contains only what is still missing. If npm publish and the tag push went through but the GitHub Releases are missing, a re-run does not bring them back, because the new publish plan leaves out what is on npm already. Create each release by hand from its tag, with the version's CHANGELOG entry as notes: `gh release create "<tag>" --title "<tag>" --notes "<CHANGELOG entry>"`. After a major release, also create the `release/vN.x` branch by hand (see [Setting up a release branch](#setting-up-a-release-branch-manual-fallback)).
 3. **NuGet:** once the Release run has created the tags and GitHub Releases, re-run the failed **NuGet Publish** run, or start **NuGet Publish** from the Actions tab with the anchor package's release tag. Pushes use `--skip-duplicate`, so packages that already went through are skipped. If the Release run itself failed before tagging, re-run that first.
 4. **If some packages were published**: Changesets is idempotent. Running `changeset publish` again skips already-published versions and publishes the remaining ones. Git tags are checked both locally and against the remote, so a re-run reports existing tags rather than trying to recreate them.
 5. **If versions were bumped but not published**: The Version Packages PR was already merged, so versions are bumped in `main`. Just re-run the publish.
@@ -877,6 +877,7 @@ push to release/**
 
 - **`.changeset/config.json`:** `"access": "public"`. Scoped packages default to private on npm, and the first publish returns HTTP 403 without it.
 - **`.npmrc`:** commit it with `registry=https://registry.npmjs.org/` and `@collana-solutions:registry=https://registry.npmjs.org/`. When changesets checks whether a version is already published, it follows pnpm's registry resolution and ignores `publishConfig.registry` in `package.json`, so the registry has to be named in `.npmrc`.
+- **No `publishConfig.registry` other than npmjs.org.** Remove the field from every published `package.json`, or set it to `https://registry.npmjs.org`. `pnpm publish` sends the tarball to that registry, so a leftover GitHub Packages URL would send the publish there, where trusted publishing cannot authenticate, even though `.npmrc` names npmjs.org.
 - **No `registry-url` on `actions/setup-node`.** With it, setup-node writes an auth line for a `NODE_AUTH_TOKEN` that the workflow does not have.
 - **pnpm 11.1.3 or later.** pnpm supports trusted publishing since 11.0.7, and 11.1.3 fixed the clash with the `.npmrc` that setup-node writes. Changesets publishes through `pnpm publish` in a pnpm repo. The template pins `pnpm@11.22.0`.
 
@@ -914,9 +915,9 @@ Changesets supports this officially. See [Beyond npm](https://changesets.dev/gui
 Changesets handles:                    nuget-publish.yml handles:
 ├── Changeset files (.changeset/*.md)  ├── Triggers on: GitHub Release published
 ├── CI changeset check                 ├── Runs only for the anchor package's tag
-├── Version Packages PR                ├── Restore, build, test, dotnet pack
-├── Changelog generation               ├── NuGet/login: OIDC token → 1-hour API key
-├── Git tags                           └── dotnet nuget push to nuget.org (.nupkg and .snupkg)
+├── Version Packages PR                ├── pack: restore, build, test, dotnet pack, verify
+├── Changelog generation               ├── publish: NuGet/login, OIDC token → 1-hour API key
+├── Git tags                           └── publish: dotnet nuget push (.nupkg and .snupkg)
 └── GitHub Releases
 ```
 
@@ -986,23 +987,32 @@ Both sub-options matter, and each fails differently:
 `changeset version` only bumps the `package.json` files. [`scripts/sync-versions.mjs`](../templates/nuget/scripts/sync-versions.mjs) wraps it, and the Release workflow runs it as its `version-script`. The script:
 
 1. runs `pnpm exec changeset version`,
-2. writes each workspace package's new version into the `.csproj` in the same directory. It sets every `<Version>` property of an unconditioned top-level `PropertyGroup`, or adds one to the first such `PropertyGroup` (or to a new one at the start of the project). A `<Version>` anywhere else, for example inside a `PackageReference`, stays as it is. The script stops with an error when a packed project sets `PackageVersion`, `VersionPrefix` or `VersionSuffix` in a `PropertyGroup` (the package version has to come from `<Version>` alone), or when the `.csproj` does not carry the new version afterwards,
+2. writes each workspace package's new version into the `.csproj` in the same directory. It sets every `<Version>` property of an unconditioned top-level `PropertyGroup`, or adds one to the first such `PropertyGroup` (or to a new one at the start of the project). A `<Version>` anywhere else, for example inside a `PackageReference`, stays as it is. The script stops with an error before writing when a packed project sets `PackageVersion`, `VersionPrefix` or `VersionSuffix` in a `PropertyGroup`, or a `<Version>` with a `Condition` on itself or on its `PropertyGroup` (the package version has to come from an unconditioned `<Version>` alone), and after writing when the `.csproj` does not carry the new version,
 3. runs `dotnet restore --force-evaluate`. A `packages.lock.json` records the version of every project its project references, and neither a locked nor a plain restore notices when that version is out of date. Without references between the packed projects nothing changes in this step.
 
 The Version Packages PR therefore carries the `package.json`, `.csproj`, CHANGELOG and lock file changes together. The restore runs at the repository root, so it needs exactly one solution or project file there.
+
+The script only sees the `.csproj` files. MSBuild can still take the version from elsewhere, for example from a `Directory.Build.props`. CI's **Verify packed versions** step therefore checks the packed result on every PR: each `.nupkg` has to carry the version of the anchor package's `package.json`, so such an override fails the PR instead of NuGet Publish after the tags exist.
 
 `release.yml` is a single job. `changesets/action` runs with `version-script: node scripts/sync-versions.mjs` and `publish-script: pnpm exec changeset publish`. Nothing goes to npm: the packages are private, so `changeset publish` only creates the git tags, and the action creates one GitHub Release per tag. All of that is pushed with the App token, so the releases start NuGet Publish (a release created with `GITHUB_TOKEN` would start no workflow). No npm dist-tag is passed on `release/**` branches, so prereleases work there as well.
 
 ### NuGet publish workflow
 
-[`nuget-publish.yml`](../templates/nuget/.github/workflows/nuget-publish.yml) runs on `release: published`:
+[`nuget-publish.yml`](../templates/nuget/.github/workflows/nuget-publish.yml) runs on `release: published`, in two jobs:
 
-- **Only the anchor package's tag publishes.** A fixed group produces one GitHub Release per package for the same version, and each one starts the workflow. The job runs only when the tag starts with the anchor package's name (`@collana-solutions/<anchor>@`), and it then packs and pushes every package of the repo. Any package of the fixed group can be the anchor, for example the one the others depend on. With a single package, that package is the anchor. This needs exactly one fixed group in `.changeset/config.json` that holds every packed project (or the single package), with the anchor in it. A package outside that group gets a GitHub Release of its own that publishes nothing, so it would never reach nuget.org.
-- **Environment `production`.** The job requests the OIDC token (`id-token: write`) in the environment `production`, which the nuget.org policy names. The environment's [deployment rules](#per-repo-setup-checklist) limit it to release tags and `main`.
-- **Checks before the push.** It restores in locked mode, builds, tests and packs. The **Verify packages** step then checks that every `.nupkg` carries the version from the tag, that the anchor package's `.nupkg` exists, and that no `.nupkg` contains a `package.json`. The version comes from the `.csproj` files, so this fails when the tag and the projects disagree. A package that kept an older version would otherwise be skipped by `--skip-duplicate` without an error.
+```text
+release published
+  pack        contents: read                    restore, build, test, pack, verify, upload
+    publish   id-token: write, env production   download, NuGet/login, dotnet nuget push
+```
+
+- **Only the anchor package's tag publishes.** A fixed group produces one GitHub Release per package for the same version, and each one starts the workflow. The `pack` job runs only when the tag starts with the anchor package's name (`@collana-solutions/<anchor>@`), and it then packs every package of the repo. `publish` needs `pack`, so it is skipped along with it. Any package of the fixed group can be the anchor, for example the one the others depend on. With a single package, that package is the anchor. This needs exactly one fixed group in `.changeset/config.json` that holds every packed project (or the single package), with the anchor in it. A package outside that group gets a GitHub Release of its own that publishes nothing, so it would never reach nuget.org.
+- **Build code never runs next to the push key.** Restore and build run MSBuild targets, analyzers and source generators from NuGet packages, and the tests run the repository's code. `pack` does all of that with `contents: read`, outside any environment, and uploads the `.nupkg` and `.snupkg` files as the artifact `nupkgs` (kept for 7 days). `publish` is the only job with `id-token: write`. It checks nothing out and builds nothing: it downloads the artifact, logs in and pushes. The runner image's .NET SDK provides `dotnet nuget push`, so it installs none.
+- **Environment `production`.** The `publish` job requests the OIDC token in the environment `production`, which the nuget.org policy names. The environment's [deployment rules](#per-repo-setup-checklist) limit it to release tags and `main`. The policy names the workflow file and the environment, not a job, so it covers the `publish` job as it is.
+- **Checks before the push.** `pack` restores in locked mode, builds, tests and packs. The **Verify packages** step then checks that every `.nupkg` carries the version from the tag, that the anchor package's `.nupkg` exists, that no `.nupkg` contains a `package.json`, and that there are as many `.nupkg` files as versioned projects (directories with a `.csproj` and a `package.json` that has a `version`). The version comes from the `.csproj` files, so this fails when the tag and the projects disagree. A package that kept an older version would otherwise be skipped by `--skip-duplicate` without an error, and a project that produced no package would leave its tagged version unpublished.
 - **Login last.** `NuGet/login` exchanges the OIDC token for an API key that is valid for one hour, so it runs only once the packages are built. Its `user` input is the org variable `NUGET_USER`.
 - **Symbols too.** `dotnet nuget push "./nupkgs/*.nupkg"` also pushes the `.snupkg` next to each `.nupkg` to the nuget.org symbol server, with the same key.
-- **Safe to repeat.** The concurrency group is on the job and named after the release tag, so runs for the same release wait for each other, and a release of another package or version never replaces a pending run. Pushes use `--skip-duplicate`. To publish an existing release again, for example after a failed push, run **NuGet Publish** from the Actions tab with the anchor package's release tag.
+- **Safe to repeat.** The concurrency group is on the `publish` job and named after the release tag, so runs for the same release wait for each other, and a release of another package or version never replaces a pending run. Pushes use `--skip-duplicate`. When only `publish` failed, **Re-run failed jobs** pushes the packages that `pack` uploaded, while the artifact exists. To publish an existing release again, for example after a failed push, run **NuGet Publish** from the Actions tab with the anchor package's release tag.
 
 > **Key detail:** `dotnet pack` leaves the `package.json` files out of the packages, and the **Verify packages** step fails if a `.nupkg` contains one. The workflow deletes no file, so a frontend or sample project with its own `package.json` still builds. Leave the generated `CHANGELOG.md` files alone: `changesets/action` reads the entry for the released version out of the `CHANGELOG.md` beside each tagged `package.json` to build the GitHub Release body, and errors if the file exists without a matching entry.
 
@@ -1093,7 +1103,7 @@ Everything documented in this guide works identically for NuGet repos:
 Only test packages (`pkg-a`, `pkg-b`, `release-process-test`) still publish to GitHub Packages. GitHub Packages has no trusted publishing, so such a repo differs from the templates:
 
 - **npm:** `.npmrc` routes the scope there (`@collana-solutions:registry=https://npm.pkg.github.com`), and `"access"` has no effect, because visibility comes from the repository and package settings. Without an OIDC credential to isolate, `release.yml` needs no job split. A single job modeled on the template's `backport` job is enough, with `packages: write` instead of `id-token: write`, no environment, `registry-url: https://npm.pkg.github.com` on `actions/setup-node`, `NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}` on the changesets step, and `--tag release-vN` on `release/**` branches only.
-- **NuGet:** `nuget-publish.yml` gets `packages: write` instead of `id-token: write` and no environment, drops `NuGet/login`, and pushes with `GITHUB_TOKEN` to `https://nuget.pkg.github.com/collana-solutions/index.json`.
+- **NuGet:** the `publish` job of `nuget-publish.yml` gets `packages: write` instead of `id-token: write` and no environment, drops `NuGet/login`, and pushes with `GITHUB_TOKEN` to `https://nuget.pkg.github.com/collana-solutions/index.json`.
 - **Consumers** need a token with `read:packages`, even for public packages.
 
 ---
@@ -1112,6 +1122,7 @@ Both templates follow these rules, and so should every workflow an adopting repo
 - **Check Dependabot by PR author:** `github.event.pull_request.user.login == 'dependabot[bot]'`, never `github.actor`. The actor is whoever triggered the run, for example by pushing to a Dependabot branch.
 - **App tokens with explicit permissions.** Every `actions/create-github-app-token` step lists `permission-*` inputs, for example `permission-contents: write`, so the token gets only those instead of everything the App may do.
 - **Publishing jobs run in the environment `production`,** whose deployment rules limit which refs reach the registry credential.
+- **The registry credential only in a job that runs no dependency code.** The install or restore, the build and, for NuGet, the tests run in a `pack` job without credentials, which uploads the packages. The `publish` job, the only one with `id-token: write`, publishes what `pack` uploaded: npm installs with `--ignore-scripts` and builds nothing, NuGet checks nothing out and only pushes. The npm `backport` job is the one exception (see [Release job layout](#release-job-layout)).
 - **Waiting periods for new releases.** Dependabot waits 30 days for GitHub Actions and 14 days for npm and NuGet packages, pnpm refuses package versions younger than 14 days (`minimumReleaseAge: 20160` with `minimumReleaseAgeStrict: true`), and **Refresh lockfiles** re-resolves transitive dependencies once a month within those limits. Security updates skip the cooldown.
 
 Run zizmor locally before pushing. The `zizmor` job uses zizmor-action v0.7.1, which runs zizmor 1.31.1. `GH_TOKEN` enables the online audits, such as the check for action versions with known vulnerabilities:
@@ -1331,7 +1342,9 @@ For .NET repos, also ensure the `package.json` version matches the `.csproj` `<V
 
 Copy the contents of [`templates/npm/`](../templates/npm/) or [`templates/nuget/`](../templates/nuget/) into the repository root and customize every spot marked `CUSTOMIZE` or `YOUR-…`. [`templates/README.md`](../templates/README.md) lists them per file. Then:
 
+- Merge the template's `package.json` into the existing root `package.json` instead of replacing it. Then run `pnpm install` and commit the updated `pnpm-lock.yaml`: the npm template adds `pkg-pr-new`, and every workflow installs with `--frozen-lockfile`, which fails while the lockfile and the manifest disagree.
 - Replace any `.npmrc` that routes the scope to GitHub Packages with the template's `.npmrc` (npm).
+- Remove `publishConfig.registry` from every published `package.json`, or set it to `https://registry.npmjs.org` (npm). It decides where `pnpm publish` sends the tarball (see [Registry configuration](#registry-configuration)).
 - Merge the [package metadata block](#package-metadata) into `Directory.Build.props`, and add a "Preview packages" section to the README that the preview comment links to (NuGet).
 - Run zizmor locally (see [Workflow security conventions](#workflow-security-conventions)) on the result, including any workflow of the repo that does not come from the templates.
 

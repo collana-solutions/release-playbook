@@ -92,15 +92,43 @@ jobs:
           path: ./test-results
           retention-days: 7
 
-      # Sticky PR comment with per-suite totals, updated in place on every push.
+      # Sticky PR comment with per-suite totals, updated in place on every push. The /linux variant installs
+      # the reporter from the action's source at the pinned commit (it needs Python 3, which ubuntu-latest
+      # has), so the SHA pins all the code that runs. The action's root starts a Docker image by a mutable tag.
       - name: Publish test results
         if: always()
-        uses: EnricoMi/publish-unit-test-result-action@7622c5bf3d112a72ab4fa3951c2aa5723d8ab92d # v2.25.0
+        uses: EnricoMi/publish-unit-test-result-action/linux@7622c5bf3d112a72ab4fa3951c2aa5723d8ab92d # v2.25.0
         with:
           files: ./test-results/**/*.trx
 
       - name: Pack (smoke test)
         run: dotnet pack --configuration Release --no-build -o ./nupkgs
+
+      # scripts/sync-versions.mjs writes each package.json version into its .csproj, and the fixed group gives
+      # every package the same version. A version that MSBuild takes from elsewhere, such as a
+      # Directory.Build.props, would only fail NuGet Publish once the release tags exist, so the PR fails here.
+      # CUSTOMIZE: the path to the anchor package's package.json.
+      - name: Verify packed versions
+        env:
+          ANCHOR_MANIFEST: packages/YOUR-ANCHOR-PROJECT/package.json
+        run: |
+          shopt -s nullglob
+          VERSION=$(jq -er .version "$ANCHOR_MANIFEST") || { echo "::error::$ANCHOR_MANIFEST has no version"; exit 1; }
+          packages=(./nupkgs/*.nupkg)
+          if [ "${#packages[@]}" -eq 0 ]; then
+            echo "::error::dotnet pack produced no .nupkg in ./nupkgs"
+            exit 1
+          fi
+          failed=0
+          for package in "${packages[@]}"; do
+            name=$(basename "$package")
+            echo "$name"
+            if [[ "$name" != *".${VERSION}.nupkg" ]]; then
+              echo "::error::$name does not carry the version ${VERSION} from ${ANCHOR_MANIFEST}"
+              failed=1
+            fi
+          done
+          exit "$failed"
 
       - name: Upload packages
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
