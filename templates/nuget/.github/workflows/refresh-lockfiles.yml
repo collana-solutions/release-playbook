@@ -1,0 +1,151 @@
+name: Refresh lockfiles
+
+# Regenerates the pnpm and NuGet lock files so that transitive dependencies are
+# refreshed to the newest versions still allowed by the declared ranges.
+#
+# Dependabot version updates only bump direct dependencies. Transitive dependencies
+# are only ever touched when a security advisory forces a lockfile patch, so they
+# accumulate staleness for months. This scheduled job re-resolves the lock files
+# within the existing ranges (no range bumps), opens a PR with the diff, and lets
+# CI and a human review catch any regression before it merges.
+#
+# The two ecosystems behave very differently here, which is worth knowing before
+# reading a diff (or an empty one):
+#
+#   pnpm  resolves the HIGHEST version matching each range, so re-resolving after
+#         deleting the lock file genuinely pulls newer transitives. This is the
+#         half that does the work.
+#   NuGet resolves the LOWEST applicable version instead, and every version in
+#         Directory.Packages.props is an exact pin, so re-evaluation normally
+#         reproduces an identical graph. It is kept for the narrow case where a
+#         locked version has been unlisted from the feed and has to re-resolve.
+
+on:
+  # First day of every month at 08:00 UTC. Freshly published transitives have then
+  # had time to age past the 14-day minimumReleaseAge floor.
+  schedule:
+    - cron: "0 8 1 * *"
+  # A dry run writes what would change to the run summary and opens no PR.
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Dry run: report the changes, open no pull request"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  refresh:
+    name: Refresh lock files
+    runs-on: ubuntu-latest
+    # The PR is pushed and opened with the App token, so GITHUB_TOKEN only reads.
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      # --force-evaluate re-resolves every dependency within its declared range and
+      # rewrites the existing lock files in place, so they are never missing. With
+      # central package management the whole solution restores in one pass.
+      - name: Refresh NuGet lock files
+        run: dotnet restore --force-evaluate
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      # Activates the pnpm version pinned in package.json's "packageManager".
+      - name: Enable Corepack
+        run: corepack enable
+
+      # Delete and reinstall so the lock file is fully re-resolved. pnpm refuses releases
+      # younger than its minimumReleaseAge window, and minimumReleaseAgeStrict makes it
+      # fail instead of recording an exception in pnpm-workspace.yaml.
+      - name: Refresh pnpm lock file
+        run: |
+          rm -f pnpm-lock.yaml
+          pnpm install --no-frozen-lockfile
+
+      - name: Report changes (dry run)
+        if: inputs.dry-run == true
+        run: |
+          {
+            echo "## Lockfile refresh (dry run)"
+            echo
+            if [ -z "$(git status --porcelain)" ]; then
+              echo "No lock file changed."
+            else
+              echo '```text'
+              git diff --stat
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The Changeset Check fails a PR that changes a package without a changeset, and
+      # the Dependabot Changeset workflow only covers Dependabot PRs. This step uses the
+      # same script and rules: a changed packages.lock.json of a packed project gives a
+      # patch for the fixed group, any other change an empty changeset.
+      # CUSTOMIZE: the path has to match the directories of the packed projects.
+      - name: Add changeset
+        if: inputs.dry-run != true
+        env:
+          PR_TITLE: "chore: refresh lockfiles (transitive dependency update)"
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No lock file changed, so no changeset is needed"
+            exit 0
+          fi
+          if [ -n "$(git status --porcelain -- 'packages/*/packages.lock.json')" ]; then
+            export WORKSPACE_PACKAGES_CHANGED=true
+          fi
+          node scripts/generate-dependabot-changeset.mjs
+
+      # GitHub does not start pull_request workflows for a push made with GITHUB_TOKEN.
+      # With the App token, CI runs on the refresh PR.
+      - name: Generate App Token
+        if: inputs.dry-run != true
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.CHANGESETS_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.CHANGESETS_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # With no changed file there is no diff, and the action opens no PR.
+      - name: Create Pull Request
+        if: inputs.dry-run != true
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch: chore/refresh-lockfiles
+          delete-branch: true
+          commit-message: "chore: refresh lockfiles (transitive dependency update)"
+          title: "chore: refresh lockfiles (transitive dependency update)"
+          labels: dependencies
+          body: |
+            Regenerates `pnpm-lock.yaml` and the NuGet `packages.lock.json` files so
+            transitive dependencies pick up the newest versions the declared ranges allow.
+
+            - pnpm: `pnpm-lock.yaml` regenerated from scratch, every range re-resolved
+              to its newest matching version.
+            - NuGet: `dotnet restore --force-evaluate` re-resolved the lock files within
+              their existing ranges. NuGet takes the lowest applicable version, so an
+              empty NuGet diff is the expected result.
+
+            No range in `package.json` or `Directory.Packages.props` changes, and pnpm's
+            `minimumReleaseAge` still applies. Review the diff and let CI run before merging.

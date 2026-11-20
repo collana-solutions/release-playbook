@@ -21,7 +21,9 @@ This is the collana-solutions guide for working with changesets. It covers **eve
   - [For Maintainers](#for-maintainers)
     - [Regular Release Flow](#regular-release-flow)
     - [How Fixed Packages Work](#how-fixed-packages-work)
-    - [Testing Packages Before Merge (pkg.pr.new)](#testing-packages-before-merge-pkgprnew)
+    - [Testing before release](#testing-before-release)
+      - [pkg.pr.new (npm)](#pkgprnew-npm)
+      - [feedz.io preview feed (NuGet)](#feedzio-preview-feed-nuget)
     - [Prereleases / Release Candidates](#prereleases--release-candidates)
       - [How it works](#how-it-works)
       - [Step-by-step walkthrough](#step-by-step-walkthrough)
@@ -46,13 +48,21 @@ This is the collana-solutions guide for working with changesets. It covers **eve
       - [What gets generated](#what-gets-generated)
       - [Setup](#setup)
   - [Publishing to public npm](#publishing-to-public-npm)
+    - [Release job layout](#release-job-layout)
+    - [Registry configuration](#registry-configuration)
+    - [Connecting the trusted publisher](#connecting-the-trusted-publisher)
   - [Adapting for NuGet Packages](#adapting-for-nuget-packages)
     - [Architecture](#architecture)
     - [Repository structure](#repository-structure)
     - [Version sync script](#version-sync-script)
     - [NuGet publish workflow](#nuget-publish-workflow)
+    - [Trusted publishing on nuget.org](#trusted-publishing-on-nugetorg)
+    - [Package metadata](#package-metadata)
     - [Dependabot changesets for NuGet](#dependabot-changesets-for-nuget)
     - [What stays the same](#what-stays-the-same)
+  - [Publishing to GitHub Packages](#publishing-to-github-packages)
+  - [Workflow security conventions](#workflow-security-conventions)
+  - [Per-repo setup checklist](#per-repo-setup-checklist)
   - [Upgrading from Changesets v2](#upgrading-from-changesets-v2)
     - [Step 1: Check Node and package manager versions](#step-1-check-node-and-package-manager-versions)
     - [Step 2: Update the packages](#step-2-update-the-packages)
@@ -63,14 +73,15 @@ This is the collana-solutions guide for working with changesets. It covers **eve
     - [Step 7: Review the remaining behavior changes](#step-7-review-the-remaining-behavior-changes)
   - [Migration Guide](#migration-guide)
     - [Prerequisites](#prerequisites)
-    - [Step 1: Install changesets](#step-1-install-changesets)
-    - [Step 2: Configure changesets](#step-2-configure-changesets)
-    - [Step 3: Set the initial version](#step-3-set-the-initial-version)
-    - [Step 4: Add workflows](#step-4-add-workflows)
-    - [Step 5: Set up the GitHub App](#step-5-set-up-the-github-app)
-    - [Step 6: Configure branch protection](#step-6-configure-branch-protection)
-    - [Step 7: Remove old release tooling](#step-7-remove-old-release-tooling)
-    - [Step 8: First changeset](#step-8-first-changeset)
+    - [Step 1: Move to pnpm](#step-1-move-to-pnpm)
+    - [Step 2: Install changesets](#step-2-install-changesets)
+    - [Step 3: Configure changesets](#step-3-configure-changesets)
+    - [Step 4: Set the initial version](#step-4-set-the-initial-version)
+    - [Step 5: Copy the template variant](#step-5-copy-the-template-variant)
+    - [Step 6: Set up the GitHub App](#step-6-set-up-the-github-app)
+    - [Step 7: Configure the repository](#step-7-configure-the-repository)
+    - [Step 8: Remove old release tooling](#step-8-remove-old-release-tooling)
+    - [Step 9: First changeset](#step-9-first-changeset)
   - [Reference](#reference)
     - [Configuration File](#configuration-file)
     - [CI Workflows](#ci-workflows)
@@ -82,20 +93,29 @@ This is the collana-solutions guide for working with changesets. It covers **eve
 
 ## Overview
 
-This is the collana-solutions standard for managing versioning and changelogs with [Changesets](https://changesets.dev). It applies to any repo that publishes one or more npm packages. The examples below use two illustrative packages — `@neolution-ch/pkg-a` and `@neolution-ch/pkg-b` — configured as a **fixed** group. Substitute your own package names.
+This is the collana-solutions standard for managing versioning and changelogs with [Changesets](https://changesets.dev). It applies to every repo that publishes public packages, in two variants:
 
-| Package (example)     | Path             |
-| --------------------- | ---------------- |
-| `@neolution-ch/pkg-a` | `packages/pkg-a` |
-| `@neolution-ch/pkg-b` | `packages/pkg-b` |
+| Variant   | Registry                            | Templates                                  | Publishes through                                                                  |
+| --------- | ----------------------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------- |
+| **npm**   | [npmjs.com](https://www.npmjs.com)  | [`templates/npm/`](../templates/npm/)      | npm trusted publishing from `release.yml`                                          |
+| **NuGet** | [nuget.org](https://www.nuget.org)  | [`templates/nuget/`](../templates/nuget/)  | nuget.org trusted publishing from `nuget-publish.yml`, after each GitHub Release   |
+
+Neither variant stores a registry token. Both exchange a short-lived GitHub OIDC token for the publish credential, in a job that runs in the `production` environment. Only test packages still publish to GitHub Packages, see [Publishing to GitHub Packages](#publishing-to-github-packages).
+
+The examples below use two illustrative packages, `@collana-solutions/pkg-a` and `@collana-solutions/pkg-b`, configured as a **fixed** group. Substitute your own package names. In a NuGet repo these are the names of the private `package.json` files that changesets versions next to each project, see [Adapting for NuGet Packages](#adapting-for-nuget-packages).
+
+| Package (example)          | Path             |
+| -------------------------- | ---------------- |
+| `@collana-solutions/pkg-a` | `packages/pkg-a` |
+| `@collana-solutions/pkg-b` | `packages/pkg-b` |
 
 A **fixed** group means the packages always share the same version number: when one is bumped, the others are bumped to the same version too, even if they have no changes. A repo can have a single package, one fixed group, or several — adjust the `fixed` array in `.changeset/config.json`.
 
-By default packages publish to **GitHub Packages** (private/restricted). GitHub Releases are created automatically on publish. To publish to the **public npm registry** instead, see [Publishing to public npm](#publishing-to-public-npm).
+GitHub Releases are created automatically on publish.
 
-This guide targets **Changesets v3** (`@changesets/cli@^3`, `@changesets/changelog-github@^1`) driven by **`changesets/action@v2`**. Changesets v3 ships as ES modules and requires Node.js `^22.11 || ^24 || >=26`, npm `>=10.9.0`, pnpm `>=10.0.0`, or Yarn `>=4.5.2`. Already running v2? Start at [Upgrading from Changesets v2](#upgrading-from-changesets-v2).
+This guide targets **Changesets v3** (`@changesets/cli@^3`, `@changesets/changelog-github@^1`) driven by **`changesets/action@v2`**. Changesets v3 ships as ES modules and requires Node.js `^22.11 || ^24 || >=26`, npm `>=10.9.0`, pnpm `>=10.0.0`, or Yarn `>=4.5.2`. Both templates use pnpm 11 (`"packageManager": "pnpm@11.22.0"`), so the commands below use `pnpm`. Already running v2? Start at [Upgrading from Changesets v2](#upgrading-from-changesets-v2).
 
-> **Adopting this in your repo?** Copy the files from [`templates/`](../templates/) and follow the [Migration Guide](#migration-guide). The workflows and the Dependabot script are generic (copy as-is); only `.changeset/config.json` (the `repo` field and `fixed` group) and `.npmrc` need per-repo customization.
+> **Adopting this in your repo?** Copy the variant from [`templates/`](../templates/) and follow the [Migration Guide](#migration-guide). [`templates/README.md`](../templates/README.md) lists every spot marked `CUSTOMIZE`, and the [Per-repo setup checklist](#per-repo-setup-checklist) covers the settings outside the repository.
 
 ---
 
@@ -114,7 +134,7 @@ A changeset is a Markdown file committed to the `.changeset/` directory that des
 After making your code changes, run:
 
 ```bash
-npx changeset
+pnpm changeset
 ```
 
 You will be prompted to:
@@ -130,7 +150,7 @@ This creates a new file in `.changeset/` with a random name like `.changeset/bra
 To skip the prompts entirely — handy in scripts — pass the bump and message as flags:
 
 ```bash
-npx changeset --patch @neolution-ch/pkg-a -m "Fix the off-by-one in the paginator"
+pnpm changeset --patch @collana-solutions/pkg-a -m "Fix the off-by-one in the paginator"
 ```
 
 **Commit this file alongside your code changes.**
@@ -157,7 +177,7 @@ The CI check only requires a changeset when your PR **changes files inside a pac
 You only need an **empty changeset** when you changed a package but intentionally don't want a release (for example, a comment-only or test-only change *inside* a package):
 
 ```bash
-npx changeset --empty
+pnpm changeset --empty
 ```
 
 This creates a changeset file that tells CI "I intentionally have no release." It will not trigger any version bumps or changelog entries.
@@ -169,7 +189,7 @@ You can add **multiple changesets** to a single PR. This is useful when:
 - You made multiple distinct changes that should have separate changelog entries
 - You want to bump different packages at different levels
 
-Just run `npx changeset` multiple times. Each creates a separate file.
+Just run `pnpm changeset` multiple times. Each creates a separate file.
 
 ### What Happens If You Forget a Changeset
 
@@ -178,7 +198,7 @@ If your PR **changed a package** but has no changeset, the **CI workflow fails**
 > **"Versionable"** excludes private (`"private": true`) packages. Changesets v3 neither versions nor tags them unless you opt in with `"privatePackages": { "version": true, "tag": true }` in `.changeset/config.json` — which repos that use changesets purely for versioning, such as [NuGet repos](#adapting-for-nuget-packages), have to do.
 
 To fix it:
-1. Run `npx changeset` (or `npx changeset --empty` if the package change intentionally has no release)
+1. Run `pnpm changeset` (or `pnpm changeset --empty` if the package change intentionally has no release)
 2. Commit and push the generated file
 
 The commit is not optional: `--since` compares committed history, so an unstaged or uncommitted `.changeset/*.md` does not satisfy the check.
@@ -189,7 +209,7 @@ A changeset file looks like this:
 
 ```markdown
 ---
-"@neolution-ch/pkg-a": minor
+"@collana-solutions/pkg-a": minor
 ---
 
 Add support for custom configuration options
@@ -224,9 +244,10 @@ Developer opens PR → adds changeset → PR merged to main
                                            ↓
                         Release workflow runs again on main
                                            ↓
-                  changesets/action runs `changeset publish`
+                   changesets publishes the new versions
                                            ↓
-              Packages published to GitHub Packages + GitHub Releases created
+         npm:   packages on npmjs.com, git tags and GitHub Releases
+         NuGet: git tags and GitHub Releases → NuGet Publish → nuget.org
 ```
 
 **Step by step:**
@@ -235,14 +256,14 @@ Developer opens PR → adds changeset → PR merged to main
 2. The Release workflow automatically creates (or updates) a PR titled **"chore: version packages"**
 3. This PR contains all the version bumps and CHANGELOG updates
 4. When you're ready to release, **merge the Version Packages PR**
-5. The Release workflow runs again, detects no pending changesets, and runs `changeset publish`
-6. Packages are published to GitHub Packages and GitHub Releases are created
+5. The Release workflow runs again, finds no pending changesets, and publishes. In the npm variant the `pack` and `publish` jobs push the new versions to npm (see [Release job layout](#release-job-layout)). In the NuGet variant `changeset publish` only creates the git tags.
+6. GitHub Releases are created for the new tags. In the NuGet variant the release of the anchor package starts **NuGet Publish**, which pushes every package to nuget.org (see [NuGet publish workflow](#nuget-publish-workflow)).
 
 > **Batching releases:** You can merge multiple PRs with changesets before merging the Version Packages PR. All changesets will be combined into a single release.
 
 ### How Fixed Packages Work
 
-Both `@neolution-ch/pkg-a` and `@neolution-ch/pkg-b` are in a **fixed** group. This means:
+Both `@collana-solutions/pkg-a` and `@collana-solutions/pkg-b` are in a **fixed** group. This means:
 
 - They **always share the same version number**
 - When a changeset bumps one package, the other gets bumped to the same version automatically
@@ -260,25 +281,80 @@ Starting state: both at `0.0.0`
 | `pkg-a: minor, pkg-b: patch` | Both → `0.1.0` (minor wins) |
 | `pkg-b: major`               | Both → `1.0.0`              |
 
-### Testing Packages Before Merge (pkg.pr.new)
+### Testing before release
 
-To test package changes before merging a PR, we use [pkg.pr.new](https://pkg.pr.new/) instead of snapshot releases. pkg.pr.new provides installable package URLs for every commit — without publishing anything to a registry.
+A published version is permanent: neither npm nor nuget.org lets you publish the same version number twice. To test a change in a real application before it is released, each variant publishes previews from its pull requests to a separate place, so no registry version is spent on them.
 
-This avoids polluting GitHub Packages with temporary snapshot versions that can never be deleted.
+| Variant | Previews on                                 | Workflow                              | Per-repo setup                                   |
+| ------- | ------------------------------------------- | ------------------------------------- | ------------------------------------------------ |
+| npm     | [pkg.pr.new](https://pkg.pr.new)            | `.github/workflows/pkg.pr.new.yml`    | Install the pkg.pr.new GitHub App on the repo    |
+| NuGet   | a [feedz.io](https://feedz.io) feed per repo | `.github/workflows/nuget-preview.yml` | Create the feed with a 30-day retention rule     |
 
-pkg.pr.new automatically comments on PRs with install instructions like:
+#### pkg.pr.new (npm)
+
+[pkg.pr.new](https://pkg.pr.new/) serves an installable tarball of every package for every commit, without publishing anything to npm. It needs **both** parts:
+
+1. The [pkg.pr.new GitHub App](https://github.com/apps/pkg-pr-new) installed on the repository.
+2. The `pkg.pr.new.yml` workflow from the npm template, which builds the packages and runs `pkg-pr-new publish` on every pull request and every push to `main`.
+
+Without the App the publish step fails with `There is no workflow defined for <id>` (HTTP 404). `pkg-pr-new` is a locked dev dependency in the root `package.json`, not a `pnpm dlx` call, so it goes through the lockfile and the `minimumReleaseAge` floor like every other tool.
+
+pkg.pr.new comments on the PR with install instructions like:
 
 ```bash
-npm install https://pkg.pr.new/@neolution-ch/pkg-a@<commit-sha>
+npm install https://pkg.pr.new/@collana-solutions/pkg-a@<commit-sha>
 ```
 
-No per-repo configuration is needed — pkg.pr.new is set up as a GitHub App.
+> **No `--compact`.** With `--compact`, pkg.pr.new prints shorter URLs, but those resolve the package through npm, so they fail for a package that has never been released. The template leaves the flag off.
+
+#### feedz.io preview feed (NuGet)
+
+NuGet has no counterpart to pkg.pr.new, so every NuGet repo has its own public preview feed on feedz.io:
+
+- **One feed per repo** in the `collana-solutions` feedz.io organization, named after the repository in lowercase with dots as dashes (`Csag.Blueprint` → `csag-blueprint`, `Csag.WorkloadIdentity` → `csag-workloadidentity`). Its URL, `https://f.feedz.io/collana-solutions/<feed>/nuget/index.json`, goes into `FEED_URL` in `nuget-preview.yml`.
+- **Public read access**, so consumers restore without credentials.
+- **A retention rule that removes versions after 30 days.** The workflow never deletes anything itself.
+- **The org secret `FEEDZ_TOKEN`** authenticates the push. feedz.io has no trusted publishing, which is why `.github/zizmor.yml` exempts `nuget-preview.yml` from the `use-trusted-publishing` audit. Pull requests from forks and from Dependabot cannot read the secret, so they publish no preview.
+
+`nuget-preview.yml` runs on every pull request to `main` or `release/**` that is not a draft. It packs every package with a preview version, pushes the `.nupkg` and `.snupkg` files to the feed, and keeps one comment on the PR updated with the version of the latest push.
+
+**How previews are numbered.** The version comes from the anchor package's `package.json`:
+
+| Pull request                                  | Preview version                           | Example, with `1.4.2` released |
+| --------------------------------------------- | ----------------------------------------- | ------------------------------ |
+| Any feature PR                                | one patch above the current release       | `1.4.3-pr.42.183`              |
+| The Version Packages PR (`changeset-release/*`) | release candidate of the upcoming version | `1.5.0-pr.73.190`              |
+
+`42` and `73` are PR numbers, `183` and `190` workflow run numbers. The run number gives every push a new version, because NuGet caches a package by ID and version and never downloads the same version twice. Every preview sorts above the current release, and all packages of the repo get the same preview version. A consumer that moves only some packages of a fixed group to a preview therefore gets a `NU1605` downgrade error instead of a silent mix.
+
+**Using a preview.** Add the feed to the application's `nuget.config`, with package source mapping:
+
+```xml
+<packageSources>
+  <clear />
+  <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+  <add key="csag-blueprint-previews" value="https://f.feedz.io/collana-solutions/csag-blueprint/nuget/index.json" />
+</packageSources>
+<packageSourceMapping>
+  <packageSource key="nuget.org">
+    <package pattern="*" />
+    <package pattern="Csag.Blueprint.*" />
+  </packageSource>
+  <packageSource key="csag-blueprint-previews">
+    <package pattern="Csag.Blueprint.*" />
+  </packageSource>
+</packageSourceMapping>
+```
+
+The package pattern has to appear under nuget.org as well. NuGet only asks the sources of a package's most specific pattern, so without it the released versions stop restoring. Then set the packages to the preview version, and update the `packages.lock.json` files if the application restores in locked mode.
+
+Add the feed only on the branch that tests the preview, never on the application's main branch, so its everyday restores do not depend on feedz.io.
 
 ### Prereleases / Release Candidates
 
 For planned major releases or beta periods, use changesets' built-in prerelease mode.
 
-> **Note:** Prerelease mode is stored in `.changeset/pre.json`, created by `changeset pre enter`. A fresh repo should **not** have this file. If you inherit a repo that's stuck in prerelease mode, run `npx changeset pre exit` before cutting a stable release.
+> **Note:** Prerelease mode is stored in `.changeset/pre.json`, created by `changeset pre enter`. A fresh repo should **not** have this file. If you inherit a repo that's stuck in prerelease mode, run `pnpm changeset pre exit` before cutting a stable release.
 >
 > While prerelease mode is active, every changeset that has already shipped in a prerelease is moved from `.changeset/` into `.changeset/pre/`. Those files stay there to build the changelog of the eventual stable release; edit or delete them directly if an entry is no longer relevant. `.changeset/pre.json` never has to be hand-edited to keep up.
 
@@ -309,7 +385,7 @@ This example assumes packages are at `1.4.0` and you want to beta-test `2.0.0`.
 
 ```bash
 git checkout -b chore/enter-beta
-npx changeset pre enter beta
+pnpm changeset pre enter beta
 git add .changeset/pre.json
 git commit -m "Enter prerelease mode (beta)"
 git push -u origin chore/enter-beta
@@ -320,7 +396,7 @@ git push -u origin chore/enter-beta
 
 Once `pre.json` is on `main`, the existing changesets (with major bumps) are versioned as `2.0.0-beta.0` instead of `2.0.0`. The workflow creates a Version Packages PR → you merge it → packages are published to the `beta` dist-tag automatically.
 
-Users running `npm install @neolution-ch/pkg-a` still get `1.4.0`. Only `npm install @neolution-ch/pkg-a@beta` gets `2.0.0-beta.0`.
+Users running `npm install @collana-solutions/pkg-a` still get `1.4.0`. Only `npm install @collana-solutions/pkg-a@beta` gets `2.0.0-beta.0`.
 
 **3. More betas (normal development continues):**
 
@@ -332,7 +408,7 @@ The version stays `2.0.0-beta.X` — new patch or minor changesets during the be
 
 ```bash
 git checkout -b chore/exit-beta
-npx changeset pre exit
+pnpm changeset pre exit
 git add .changeset/pre.json
 git commit -m "Exit prerelease mode"
 git push -u origin chore/exit-beta
@@ -374,7 +450,7 @@ git push -u origin chore/switch-to-beta
 If you already published versions under the previous phase (e.g., `2.0.0-alpha.3`), you need at least one pending changeset for the Release workflow to produce `2.0.0-beta.0` — the changesets already consumed by the alphas now live in `.changeset/pre/` and don't count. If there are no pending changesets, add one:
 
 ```bash
-npx changeset
+pnpm changeset
 # Select any package, choose patch, write "Promote to beta"
 ```
 
@@ -402,7 +478,7 @@ Prereleases block stable releases from `main`. Before entering prerelease mode, 
 | **Minor release** (new features, backwards-compatible) | Usually unnecessary — just release stable and ship a patch if something is wrong |
 | **Patch release**                                      | Never needs a prerelease                                                         |
 
-For minor releases, **pkg.pr.new** often covers the "test before shipping" need without blocking `main`.
+For minor releases, the [preview packages](#testing-before-release) from pkg.pr.new or the feedz.io feed often cover the "test before shipping" need without blocking `main`.
 
 If you do run a prerelease for a minor version and then need an emergency patch on the current stable version, see [Emergency patches during a prerelease](#emergency-patches-during-a-prerelease).
 
@@ -415,7 +491,7 @@ Instead, create a release branch from the last stable tag and use the normal bac
 **1. Create the release branch (one-time):**
 
 ```bash
-git checkout -b release/v1.2.x @neolution-ch/pkg-a@1.2.3
+git checkout -b release/v1.2.x @collana-solutions/pkg-a@1.2.3
 git push -u origin release/v1.2.x
 ```
 
@@ -425,7 +501,7 @@ git push -u origin release/v1.2.x
 git checkout release/v1.2.x && git pull
 git checkout -b fix/urgent-bug
 # Apply the fix
-npx changeset   # select patch
+pnpm changeset   # select patch
 git push -u origin fix/urgent-bug
 # Open PR → release/v1.2.x (not main!)
 ```
@@ -438,7 +514,7 @@ git push -u origin fix/urgent-bug
 git checkout main && git pull
 git checkout -b fix/cherry-pick-urgent-bug
 git cherry-pick <commit-sha>
-npx changeset   # select patch
+pnpm changeset   # select patch
 git push -u origin fix/cherry-pick-urgent-bug
 # Open PR → main
 ```
@@ -463,14 +539,14 @@ Consumers on the `@beta` tag will jump from `2.1.0-beta.0` to `3.0.0-beta.0`. Th
 
 1. Create `release/v2.x` from the last beta tag before the major change was added:
    ```bash
-   git checkout -b release/v2.x @neolution-ch/pkg-a@2.1.0-beta.0
+   git checkout -b release/v2.x @collana-solutions/pkg-a@2.1.0-beta.0
    git push -u origin release/v2.x
    ```
 
 2. Exit prerelease mode on that branch (via PR targeting `release/v2.x`):
    ```bash
    git checkout -b chore/exit-beta-v2
-   npx changeset pre exit
+   pnpm changeset pre exit
    git add .changeset/pre.json
    git commit -m "Exit prerelease mode"
    git push -u origin chore/exit-beta-v2
@@ -515,9 +591,11 @@ In most cases the release branch is created automatically. Create one manually w
 
 ```bash
 # Create the release branch from the last v1 tag
-git checkout -b release/v1.x @neolution-ch/pkg-a@1.5.2
+git checkout -b release/v1.x @collana-solutions/pkg-a@1.5.2
 git push -u origin release/v1.x
 ```
+
+> **Tags from before the scope rename:** the organization was called `neolution-ch` before, and older release tags read `@neolution-ch/<pkg>@<version>`. The Release workflow only looks at tags of the packages it just published, so the first major release after the rename finds no tag of the previous major and creates no release branch. Create it by hand from the last `@neolution-ch/...` tag of that major. The NuGet tag gate also skips these tags, which is fine because their versions are on nuget.org already.
 
 > **Tip:** After pushing, configure **branch protection rules** for `release/**` in GitHub Settings (same rules as `main` — require status checks, require PR reviews). This ensures backports go through CI and code review.
 
@@ -540,7 +618,7 @@ The process is the same as a normal release — just target the release branch i
 
 3. **Add a changeset:**
    ```bash
-   npx changeset
+   pnpm changeset
    # Select the affected package(s) and bump type (usually patch)
    ```
 
@@ -554,7 +632,7 @@ The process is the same as a normal release — just target the release branch i
 
 6. **Merge the PR** — the Release workflow runs on `release/v1.x`, creating a Version Packages PR targeting that branch
 
-7. **Merge the Version Packages PR** — packages are published to GitHub Packages and a GitHub Release is created
+7. **Merge the Version Packages PR**: the packages are published (npm through the `backport` job, NuGet through NuGet Publish) and a GitHub Release is created
 
 8. **Cherry-pick back to `main`** if the fix also applies to the current version
 
@@ -569,49 +647,64 @@ release/v1.x:     └──── v1.5.3 ──── v1.5.4 ──── v1.6.0
 
 All releases from `release/v1.x` go through the same automated flow: PR → CI check → merge → Version Packages PR → merge → publish.
 
-> **Dist-tags:** Backport releases are published with a version-specific dist-tag (e.g., `release-v1`) instead of `latest`. This means `npm install @neolution-ch/pkg-a` always returns the highest stable version from `main`, while `npm install @neolution-ch/pkg-a@release-v1` returns the latest v1 release.
+> **Dist-tags (npm):** Backport releases are published with a version-specific dist-tag (e.g., `release-v1`) instead of `latest`. NuGet has no dist-tags, so a backport is simply a lower version on nuget.org. This means `npm install @collana-solutions/pkg-a` always returns the highest stable version from `main`, while `npm install @collana-solutions/pkg-a@release-v1` returns the latest v1 release.
 
-> **Don't combine a release branch with prerelease mode.** `changeset publish --tag <name>` is rejected outright while `pre.json` is in `pre` mode — "Releasing under custom tag is not allowed in pre mode!", exit 1. Since the Release workflow adds `--tag release-vN` on every `release/**` branch, a prerelease there will fail the publish step. Exit prerelease mode before the Version Packages PR is merged, or drop the `--tag` for that branch. Prereleases on `main` are unaffected: no `--tag` is passed there, and changesets publishes under the prerelease tag by itself.
+> **Don't combine a release branch with prerelease mode.** `changeset publish --tag <name>` is rejected outright while `pre.json` is in `pre` mode ("Releasing under custom tag is not allowed in pre mode!", exit 1). Since the npm `backport` job adds `--tag release-vN` on every `release/**` branch, a prerelease there will fail the publish step. Exit prerelease mode before the Version Packages PR is merged, or drop the `--tag` for that branch. Prereleases on `main` are unaffected: no `--tag` is passed there, and changesets publishes under the prerelease tag by itself. The NuGet Release workflow passes no `--tag` at all, so this does not apply to NuGet repos.
 
 > **Changelogs:** Each branch maintains its own `CHANGELOG.md`. The changelog on `release/v1.x` only contains v1 entries, while `main` only contains entries from `main`. The **GitHub Release page** is the canonical cross-branch reference for all release notes.
 
 ### Recovering From a Failed Publish
 
-If the publish step fails (e.g., network error, registry issue):
+If a publish fails (network error, registry outage, a trust configuration that does not match the workflow):
 
-1. **Check what was published** — look at the GitHub Packages page for your packages
-2. **If nothing was published**: Re-run the Release workflow from the Actions tab, or manually run:
-   ```bash
-   npx changeset publish
-   ```
-3. **If some packages were published**: Changesets is idempotent — running `changeset publish` again will skip already-published versions and publish the remaining ones. Git tags are checked both locally and against the remote, so a re-run reports existing tags rather than trying to recreate them
-4. **If versions were bumped but not published**: The Version Packages PR was already merged, so versions are bumped in `main`. Just re-run publish.
+1. **Check what was published:** the package pages on npmjs.com or nuget.org, and the git tags and GitHub Releases of the repo.
+2. **npm:** re-run the failed Release run from the Actions tab. `select-mode` compares the `package.json` versions with npm again, so the publish plan contains only what is still missing.
+3. **NuGet:** once the Release run has created the tags and GitHub Releases, re-run the failed **NuGet Publish** run, or start **NuGet Publish** from the Actions tab with the anchor package's release tag. Pushes use `--skip-duplicate`, so packages that already went through are skipped. If the Release run itself failed before tagging, re-run that first.
+4. **If some packages were published**: Changesets is idempotent. Running `changeset publish` again skips already-published versions and publishes the remaining ones. Git tags are checked both locally and against the remote, so a re-run reports existing tags rather than trying to recreate them.
+5. **If versions were bumped but not published**: The Version Packages PR was already merged, so versions are bumped in `main`. Just re-run the publish.
 
 ### Manual Publish Fallback
 
-If the CI publishing is not working and you need an emergency release:
+Use this only when the workflows cannot publish, the release cannot wait, and a [re-run](#recovering-from-a-failed-publish) has failed. No registry token is stored anywhere, so a manual publish runs with a maintainer's own credentials. It loses the provenance that the workflows add, and the [tag ruleset](#per-repo-setup-checklist) lets only admins push release tags by hand.
+
+**npm.** The Version Packages PR is merged, so `main` carries the new versions:
 
 ```bash
-# 1. Pull the latest main
+# 1. A clean checkout of main
 git checkout main && git pull
+pnpm install --frozen-lockfile
 
-# 2. Make sure versions are bumped (if not already)
-npx changeset version
-git add . && git commit -m "Version packages" && git push
+# 2. Log in with an account that may publish the packages. With "Require two-factor
+#    authentication and disallow tokens" set, publishing works interactively with a one-time code.
+npm login
 
-# 3. Authenticate to GitHub Packages
-npm login --registry=https://npm.pkg.github.com --scope=@neolution-ch
+# 3. Build, then publish what is not on npm yet. This also creates the git tags locally.
+pnpm run build
+pnpm changeset publish --otp=<code>
 
-# 4. Publish
-npx changeset publish
-
-# 5. Push tags
+# 4. Push the tags (needs an admin, see the tag ruleset)
 git push --follow-tags
 ```
 
-> **Note:** `changeset version` exits with code **1** when there are no unreleased changesets. Skip step 2 entirely if the versions are already bumped — and if you wrap these commands in a script that runs under `set -e`, guard the call with `npx changeset version || true` so an empty release doesn't abort it.
+Then create the GitHub Releases by hand, for example with `gh release create <tag> --notes "<CHANGELOG entry>"`.
 
-> **Tags without npm:** `changeset publish` creates the git tags as part of publishing. If you only need the tags (a failed publish that already went through, or a repo that publishes elsewhere), run `npx changeset git-tag`.
+**NuGet.** Run **NuGet Publish** from the Actions tab with the anchor package's release tag first. If trusted publishing itself is broken, publish from a clean clone:
+
+```bash
+# 1. The release tag of the anchor package
+git checkout "@collana-solutions/<anchor-package>@1.2.3"
+
+# 2. Remove the changesets stubs and pack. CI builds are deterministic only with ContinuousIntegrationBuild.
+find . -name package.json -not -path "*/node_modules/*" -delete
+dotnet pack --configuration Release -p:ContinuousIntegrationBuild=true -o ./nupkgs
+
+# 3. Push with a short-lived API key
+dotnet nuget push "./nupkgs/*.nupkg" --api-key "<key>" --source https://api.nuget.org/v3/index.json --skip-duplicate
+```
+
+Create the API key on nuget.org for the owner `collana-solutions`, with the **Push** scope, a glob that matches only the repo's package IDs and the shortest expiry, and delete it right after the push. If the release tags do not exist yet, run `pnpm changeset publish` on `main` first: the packages are private, so it only creates the tags. Push them with `git push --follow-tags`.
+
+> **Tags without a registry:** `changeset publish` creates the git tags as part of publishing. If you only need the tags (a failed publish that already went through, or a repo that publishes elsewhere), run `pnpm changeset git-tag`.
 
 ### Reverting a Changeset
 
@@ -627,17 +720,16 @@ git add . && git commit -m "Remove incorrect changeset"
 
 If a version was published that needs to be undone:
 
-1. **You cannot un-publish from GitHub Packages** once published (npm registry limitation)
+1. **A published version cannot be replaced.** npm allows unpublishing only in narrow cases and nuget.org not at all, and neither registry ever accepts the same version number again.
 2. Instead, publish a **new patch version** with the fix or revert:
    ```bash
    git revert <commit-of-bad-change>
-   npx changeset  # add a patch changeset describing the revert
+   pnpm changeset  # add a patch changeset describing the revert
    # Merge to main, let the regular release flow publish the fix
    ```
-3. If the version is truly broken, you can **deprecate** it:
-   ```bash
-   npm deprecate @neolution-ch/pkg-a@1.2.0 "This version has a critical bug, use 1.2.1" --registry=https://npm.pkg.github.com
-   ```
+3. If the version is truly broken, **deprecate** it:
+   - npm: `npm deprecate @collana-solutions/pkg-a@1.2.0 "This version has a critical bug, use 1.2.1"`
+   - nuget.org: on the package's **Manage** page, select the version under **Deprecation**, choose the reason, and name the fixed version as the alternate.
 
 ### Skipping a Package From Release
 
@@ -647,7 +739,7 @@ Add it to the `ignore` array in `.changeset/config.json`:
 
 ```json
 {
-  "ignore": ["@neolution-ch/pkg-b"]
+  "ignore": ["@collana-solutions/pkg-b"]
 }
 ```
 
@@ -662,7 +754,7 @@ Add it to the `ignore` array in `.changeset/config.json`:
 Sometimes you need to publish a new version even with no code changes (e.g., to update metadata, rebuild with a new toolchain):
 
 ```bash
-npx changeset
+pnpm changeset
 # Select the package(s) and choose "patch"
 # Write something like "Rebuild with updated toolchain"
 ```
@@ -680,7 +772,8 @@ Dependabot opens PR
   → CI fails (no changeset)
   → Dependabot Changeset workflow triggers:
       1. Checks if a changeset already exists → skips if yes
-      2. Checks if any workspace package.json files changed (git diff)
+      2. Checks if any workspace package.json files changed (git diff),
+         or in a NuGet repo the .csproj, lock and Directory.Packages.props files
       3. Parses the PR title and body to extract dependency update info
       4. Generates a changeset file
       5. Commits and pushes it (via GitHub App token)
@@ -707,8 +800,8 @@ The generated changeset includes the PR title and a table with emoji bump indica
 
 ```markdown
 ---
-"@neolution-ch/pkg-a": patch
-"@neolution-ch/pkg-b": patch
+"@collana-solutions/pkg-a": patch
+"@collana-solutions/pkg-b": patch
 ---
 
 Bump jws from 4.0.0 to 4.0.1
@@ -722,8 +815,8 @@ Bump jws from 4.0.0 to 4.0.1
 
 ```markdown
 ---
-"@neolution-ch/pkg-a": patch
-"@neolution-ch/pkg-b": patch
+"@collana-solutions/pkg-a": patch
+"@collana-solutions/pkg-b": patch
 ---
 
 Bump the npm-ecosystem group with 3 updates
@@ -739,40 +832,70 @@ If the PR body can't be parsed (unexpected format), the changeset falls back to 
 
 #### Setup
 
-The workflow (`.github/workflows/dependabot-changeset.yml`) and script (`scripts/generate-dependabot-changeset.mjs`) are provided in [`templates/`](../templates/) — copy them into your repo. The only manual step is adding **Dependabot secrets**:
+The workflow (`.github/workflows/dependabot-changeset.yml`), the script (`scripts/generate-dependabot-changeset.mjs`) and `.github/dependabot.yml` are part of both template variants. `dependabot.yml` waits 30 days before it proposes a GitHub Actions update and 14 days for npm and NuGet packages (`cooldown`), and groups all updates of an ecosystem into one PR, with a separate group for security updates, which skip the cooldown.
 
-1. Go to **Settings** → **Secrets and variables** → **Dependabot**
-2. Add `CHANGESETS_BOT_CLIENT_ID` — same value as the existing Actions secret
-3. Add `CHANGESETS_BOT_PRIVATE_KEY` — same value as the existing Actions secret
+The workflow authenticates with the `CHANGESETS_BOT_CLIENT_ID` and `CHANGESETS_BOT_PRIVATE_KEY` secrets. Both exist at org level, as **Actions** secrets and as **Dependabot** secrets. Check that the repository has access to them under **Organization settings** → **Secrets and variables**.
 
 > **Why Dependabot secrets?** Dependabot PRs cannot access regular Actions secrets for security reasons. GitHub provides a separate secrets store specifically for Dependabot-triggered workflows. This avoids using `pull_request_target` (which runs with elevated privileges and is a security risk).
 
-> **Note:** The workflow uses the GitHub App token (not `GITHUB_TOKEN`) to push commits, so the pushed changeset triggers a CI re-run — same pattern as the Release workflow.
+> **Note:** The workflow uses the GitHub App token (not `GITHUB_TOKEN`) to push commits, so the pushed changeset triggers a CI re-run, the same pattern as the Release workflow. The token is passed to `git push` explicitly and never stored in the git config.
 
 ---
 
 ## Publishing to public npm
 
-By default this setup publishes to **GitHub Packages** (private/restricted). To publish to the **public npm registry** (`registry.npmjs.org`) instead, apply **all** of the following — changing only some of them silently fails:
+The npm template publishes to the public registry (`registry.npmjs.org`) through [trusted publishing](https://docs.npmjs.com/trusted-publishers). npmjs.com trusts the repository, the workflow file `release.yml` and the environment `production`, and pnpm exchanges the job's GitHub OIDC token for a short-lived publish token. No npm token is stored anywhere, and the published versions carry [provenance](https://docs.npmjs.com/generating-provenance-statements) without any extra flag.
 
-| #   | File                            | Change                                                                                              | Why                                                                                                                                                   |
-| --- | ------------------------------- | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | `.changeset/config.json`        | `"access": "restricted"` → `"public"`                                                               | Scoped packages default to private on npm; the first publish returns HTTP 403 without this                                                            |
-| 2   | `.npmrc`                        | Remove the `@neolution-ch:registry=…github.com` line (or set `registry=https://registry.npmjs.org`) | `.npmrc` overrides the workflow's registry — otherwise publishing silently goes to GitHub Packages                                                    |
-| 3   | `packages/*/package.json`       | Set `publishConfig.registry` to `https://registry.npmjs.org` (or remove `publishConfig`)            | Overrides `.npmrc` during publish                                                                                                                     |
-| 4   | `.github/workflows/release.yml` | `registry-url: "https://registry.npmjs.org"`                                                        | Points npm auth at the public registry                                                                                                                |
-| 5   | `.github/workflows/release.yml` | `NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}`                                                         | `GITHUB_TOKEN` only authenticates to GitHub Packages; add an npm automation token as the `NPM_TOKEN` secret                                           |
-| 6   | `.github/workflows/release.yml` | Add `id-token: write` to `permissions` and append `--provenance` to the publish command             | Publishes with [npm provenance](https://docs.npmjs.com/generating-provenance-statements) (supply-chain attestation) — recommended for public packages |
+### Release job layout
 
-The template's `packages: write` permission only serves GitHub Packages, so drop it from `release.yml` as well.
+`release.yml` follows the [changesets automating guide](https://changesets.dev/guide/automating) and splits the release on `main` into jobs, so only one job can ever request an npm credential:
 
-Everything else is registry-agnostic: the CI changeset gate, the Version Packages PR, changelog generation, dist-tags/backport tags, pkg.pr.new, and GitHub Releases all work identically.
+```text
+push to main
+  select-mode         contents: read                       version, publish or none
+    version           App token                            opens or updates the version PR
+    pack              contents: read                       builds, uploads the tarballs
+      publish         id-token: write, env production      no build, install with --ignore-scripts
+        release-branch    App token                        major bumps only
+push to release/**
+  backport            id-token: write, env production      one job, publishes to release-vN
+```
 
-> **pnpm repos:** when Changesets checks whether a version is already published, it follows pnpm's registry resolution and ignores `publishConfig.registry` and scope-based registry overrides in `package.json`. Row 3 above still governs where `npm publish` sends the tarball, but the *existence* check reads `.npmrc` — so a pnpm repo needs the registry configured there as well.
+- **`select-mode`** decides what the run does: `version` while changesets are pending, `publish` when a `package.json` version is not on npm yet, `none` otherwise.
+- **`version`** opens or updates the Version Packages PR with the App token, so CI runs on it.
+- **`pack`** installs with the install scripts that `allowBuilds` in `pnpm-workspace.yaml` permits, builds, and uploads the tarballs of the publish plan as an artifact. It has no publish credentials.
+- **`publish`** is the only job with `id-token: write`, and it runs in the environment `production`. It installs with `pnpm install --frozen-lockfile --ignore-scripts`, because the publish sub-action runs the changesets CLI from `node_modules`, builds nothing, and publishes the packed tarballs. Code from the dependency tree therefore never runs next to the publish credential. It creates the git tags and GitHub Releases with the App token, so the [tag ruleset](#per-repo-setup-checklist) can allow the App alone.
+- **`release-branch`** creates `release/vN.x` after a major release (see [Backporting](#backporting--hotfixes-on-older-versions)).
+- **Every release job** sets `package-manager-cache: false` on `actions/setup-node`, so no job restores a dependency cache that a pull request run could have written.
 
-> **Trusted publishing:** npm now recommends [trusted publishing](https://docs.npmjs.com/trusted-publishers) (OIDC) over long-lived automation tokens, which expire after 90 days. It replaces `NODE_AUTH_TOKEN` entirely and requires splitting the release job so that `id-token: write` is granted only to the publishing step — see the [changesets automation guide](https://changesets.dev/guide/automating) for the `changesets/action/select-mode`, `/version`, `/pack`, and `/publish` sub-action layout. GitHub Packages does not support trusted publishing, so the default setup in this playbook keeps `NODE_AUTH_TOKEN`.
+**Backports run as a single `backport` job.** Changesets refuses a custom dist-tag in artifact mode ("Releasing under custom tag is not allowed in artifact mode"), and `publish-plan` has no tag option. A push to `release/**` therefore runs one job that versions, builds and publishes with `changeset publish --tag release-vN`, also through trusted publishing in the environment `production`. Building next to the publish credential is accepted there because backports are rare.
 
-> **On the `access` field:** `access` is an npm CLI flag (`npm publish --access <value>`). It controls scoped-package visibility on **npmjs.org only** (`restricted` = private, `public` = public). GitHub Packages **ignores** it — there, visibility is governed by the repository/package settings, not this field.
+### Registry configuration
+
+- **`.changeset/config.json`:** `"access": "public"`. Scoped packages default to private on npm, and the first publish returns HTTP 403 without it.
+- **`.npmrc`:** commit it with `registry=https://registry.npmjs.org/` and `@collana-solutions:registry=https://registry.npmjs.org/`. When changesets checks whether a version is already published, it follows pnpm's registry resolution and ignores `publishConfig.registry` in `package.json`, so the registry has to be named in `.npmrc`.
+- **No `registry-url` on `actions/setup-node`.** With it, setup-node writes an auth line for a `NODE_AUTH_TOKEN` that the workflow does not have.
+- **pnpm 11.1.3 or later.** pnpm supports trusted publishing since 11.0.7, and 11.1.3 fixed the clash with the `.npmrc` that setup-node writes. Changesets publishes through `pnpm publish` in a pnpm repo. The template pins `pnpm@11.22.0`.
+
+> **On the `access` field:** `access` is an npm CLI flag (`npm publish --access <value>`). It controls scoped-package visibility on **npmjs.org only** (`restricted` = private, `public` = public). GitHub Packages **ignores** it: there, visibility comes from the repository and package settings.
+
+### Connecting the trusted publisher
+
+Every package needs a trusted publisher on npmjs.com that names the repository, `release.yml` and the environment `production`. Register it for all packages of the repo with `npm trust`, logged in as a maintainer of the packages:
+
+```bash
+for p in pkg-a pkg-b; do
+  npm trust github "@collana-solutions/$p" --repo collana-solutions/<repo> \
+    --file release.yml --env production --allow-publish --yes
+  sleep 2
+done
+```
+
+- **`--allow-publish` is required.** A new trusted publisher configuration allows only staged publishing unless it is set, and the workflow publishes directly.
+- **Publish within 2 days.** A new configuration has to publish within 2 days, so register it right before merging the Version Packages PR.
+- **The package has to exist.** `npm trust` only accepts packages that are already on npm. If npmjs.com offers no way to add a trusted publisher to an unpublished name, publish its first version by hand (see [Manual Publish Fallback](#manual-publish-fallback)) and register the trusted publisher afterwards.
+
+**After the first trusted publish**, set every package to **Require two-factor authentication and disallow tokens** (package **Settings** on npmjs.com). Trusted publishing keeps working, and no token can publish any more. Then delete the npm token secrets the repo used, and remove the org secret once nothing else uses it.
 
 ---
 
@@ -780,46 +903,53 @@ Everything else is registry-agnostic: the CI changeset gate, the Version Package
 
 Changesets is an npm tool, but it can manage versioning and changelogs for .NET (NuGet) packages with a thin bridge. The key insight: let changesets handle what it's good at (changeset files, CI checks, changelogs, GitHub Releases) and use a separate workflow for the actual NuGet publish.
 
-Changesets supports this officially — see [Beyond npm](https://changesets.dev/guide/beyond-npm), which names NuGet explicitly, and the [Publish Git Tags Only](https://changesets.dev/guide/automating) recipe. The setup below is that pattern with the collana-solutions workflows wired in.
+Changesets supports this officially. See [Beyond npm](https://changesets.dev/guide/beyond-npm), which names NuGet explicitly, and the [Publish Git Tags Only](https://changesets.dev/guide/automating) recipe. The NuGet template is that pattern with the collana-solutions workflows wired in, publishing to nuget.org through trusted publishing.
 
 ### Architecture
 
 ```
-Changesets handles:                    Separate workflow handles:
+Changesets handles:                    nuget-publish.yml handles:
 ├── Changeset files (.changeset/*.md)  ├── Triggers on: GitHub Release published
-├── CI changeset check                 ├── Reads version from git tag
-├── Version Packages PR                ├── dotnet pack with that version
-├── Changelog generation               └── dotnet nuget push to GitHub Packages
-├── Git tags
+├── CI changeset check                 ├── Runs only for the anchor package's tag
+├── Version Packages PR                ├── Restore, build, test, dotnet pack
+├── Changelog generation               ├── NuGet/login: OIDC token → 1-hour API key
+├── Git tags                           └── dotnet nuget push to nuget.org (.nupkg and .snupkg)
 └── GitHub Releases
 ```
 
-Changesets creates GitHub Releases with tags like `@scope/pkg@1.2.3`. The NuGet publish workflow triggers on `release: published` and extracts the version from the tag.
+Changesets creates GitHub Releases with tags like `@collana-solutions/pkg-a@1.2.3`. The NuGet publish workflow triggers on `release: published` and extracts the version from the tag.
 
 ### Repository structure
 
-Each .NET project needs a minimal `package.json` so changesets can track its version:
+Each packed .NET project needs a minimal `package.json` so changesets can track its version:
 
 ```
 ├── .changeset/
 │   └── config.json
 ├── packages/
-│   └── my-dotnet-lib/
+│   └── MyDotnetLib/
 │       ├── MyDotnetLib.csproj
 │       ├── package.json          ← minimal, for changesets only
-│       └── src/
-├── package.json                  ← root workspace
+│       └── README.md             ← packed into the .nupkg
+├── Directory.Build.props         ← shared package metadata
+├── global.json                   ← the SDK version the workflows install
+├── icon.png                      ← package icon
+├── package.json                  ← root: pnpm version and the changesets CLI
+├── pnpm-workspace.yaml           ← lists the project directories
 └── .github/workflows/
     ├── ci.yml
-    ├── release.yml               ← npm version minus the registry settings
-    └── nuget-publish.yml         ← new, triggers on release
+    ├── release.yml               ← version PR, tags, GitHub Releases
+    ├── nuget-publish.yml         ← pushes to nuget.org on a GitHub Release
+    └── nuget-preview.yml         ← pushes PR previews to feedz.io
 ```
+
+The projects do not have to live under `packages/`. A single-package repo often keeps its project folder at the root. List the directories in `pnpm-workspace.yaml` and adjust the paths marked `CUSTOMIZE` in the templates.
 
 The per-project `package.json` is minimal:
 
 ```json
 {
-  "name": "@neolution-ch/my-dotnet-lib",
+  "name": "@collana-solutions/my-dotnet-lib",
   "version": "1.0.0",
   "private": true
 }
@@ -846,165 +976,179 @@ Both sub-options matter, and each fails differently:
 
 > The upstream migration guide suggests `{ "version": true, "tag": false }` for restoring v2 behavior. That is the right value for a repo whose private packages are internal fixtures; it is the **wrong** value here, because the git tags are the trigger for the NuGet publish.
 
-> **Commit `package-lock.json`.** Changesets v3 only recognizes an npm workspace when the root has both a `workspaces` field **and** a `package-lock.json` (Yarn likewise needs `yarn.lock`). Without the lockfile the repo collapses to a single root package: `changeset` fails with "No versionable packages found", and any tag that does get created is named `v1.2.3` instead of `@scope/pkg@1.2.3` — which the version/package parsing in `nuget-publish.yml` below relies on. A .NET repo that never runs `npm install` locally is the easy way to trip over this.
+> **Commit `pnpm-workspace.yaml`.** Changesets finds the packages through the pnpm workspace, which it recognizes by `pnpm-workspace.yaml` at the repo root. Without it the repo collapses to a single root package: `changeset` fails with "No versionable packages found", and any tag that does get created is named `v1.2.3` instead of `@scope/pkg@1.2.3`, which the version parsing in `nuget-publish.yml` relies on. Commit `pnpm-lock.yaml` as well, because every workflow installs with `--frozen-lockfile`.
 
 ### Version sync script
 
-The Release workflow needs a custom version command that syncs `package.json` versions into `.csproj` files after `changeset version` runs. Add this as `scripts/sync-versions.mjs`:
+`changeset version` only bumps the `package.json` files. [`scripts/sync-versions.mjs`](../templates/nuget/scripts/sync-versions.mjs) wraps it, and the Release workflow runs it as its `version-script`. The script:
 
-```javascript
-import fs from "node:fs";
-import path from "node:path";
-import { execSync } from "node:child_process";
+1. runs `pnpm exec changeset version`,
+2. writes each workspace package's new version into the `<Version>` of the `.csproj` in the same directory (or adds a `<Version>` to its first `PropertyGroup`),
+3. runs `dotnet restore --force-evaluate`. A `packages.lock.json` records the version of every project its project references, and neither a locked nor a plain restore notices when that version is out of date. Without references between the packed projects nothing changes in this step.
 
-// Run changeset version first
-execSync("npx changeset version", { stdio: "inherit" });
+The Version Packages PR therefore carries the `package.json`, `.csproj`, CHANGELOG and lock file changes together. The restore runs at the repository root, so it needs exactly one solution or project file there.
 
-// Find all packages with both package.json and .csproj
-const packagesDir = path.join(import.meta.dirname, "..", "packages");
-for (const dir of fs.readdirSync(packagesDir)) {
-  const pkgJsonPath = path.join(packagesDir, dir, "package.json");
-  const projDir = path.join(packagesDir, dir);
-
-  if (!fs.existsSync(pkgJsonPath)) continue;
-
-  const pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, "utf8"));
-  const version = pkgJson.version;
-
-  // Find .csproj files in this directory
-  const csprojFiles = fs.readdirSync(projDir).filter((f) => f.endsWith(".csproj"));
-  for (const csproj of csprojFiles) {
-    const csprojPath = path.join(projDir, csproj);
-    let content = fs.readFileSync(csprojPath, "utf8");
-
-    if (content.includes("<Version>")) {
-      content = content.replace(/<Version>[^<]*<\/Version>/g, `<Version>${version}</Version>`);
-    } else {
-      // Add Version to the first PropertyGroup
-      content = content.replace(
-        /<PropertyGroup>/,
-        `<PropertyGroup>\n    <Version>${version}</Version>`
-      );
-    }
-
-    fs.writeFileSync(csprojPath, content);
-    console.log(`Updated ${csproj} to version ${version}`);
-  }
-}
-```
-
-Then configure the Release workflow to use it:
-
-```yaml
-- name: Create Release Pull Request or Publish
-  uses: changesets/action@v2
-  with:
-      github-token: ${{ steps.app-token.outputs.token }}
-      version-script: node scripts/sync-versions.mjs
-      publish-script: npx changeset publish
-```
-
-This way the Version Packages PR includes both `package.json` and `.csproj` version bumps.
-
-Nothing is published to npm, so the NuGet Release workflow also drops the template's `packages: write` permission, the `registry-url` input of **Setup Node.js**, and the `NODE_AUTH_TOKEN` env of the changesets step.
+`release.yml` is a single job. `changesets/action` runs with `version-script: node scripts/sync-versions.mjs` and `publish-script: pnpm exec changeset publish`. Nothing goes to npm: the packages are private, so `changeset publish` only creates the git tags, and the action creates one GitHub Release per tag. All of that is pushed with the App token, so the releases start NuGet Publish (a release created with `GITHUB_TOKEN` would start no workflow). No npm dist-tag is passed on `release/**` branches, so prereleases work there as well.
 
 ### NuGet publish workflow
 
-Add `.github/workflows/nuget-publish.yml`:
+[`nuget-publish.yml`](../templates/nuget/.github/workflows/nuget-publish.yml) runs on `release: published`:
 
-```yaml
-name: NuGet Publish
+- **Only the anchor package's tag publishes.** A fixed group produces one GitHub Release per package for the same version, and each one starts the workflow. The job runs only when the tag starts with the anchor package's name (`@collana-solutions/<anchor>@`), and it then packs and pushes every package of the repo. Any package of the fixed group can be the anchor, for example the one the others depend on. With a single package, that package is the anchor.
+- **Environment `production`.** The job requests the OIDC token (`id-token: write`) in the environment `production`, which the nuget.org policy names. The environment's [deployment rules](#per-repo-setup-checklist) limit it to release tags and `main`.
+- **Checks before the push.** It restores in locked mode, builds, tests and packs, then verifies that the anchor package's `.nupkg` carries the version from the tag. The version comes from the `.csproj` files, so this fails when the tag and the projects disagree.
+- **Login last.** `NuGet/login` exchanges the OIDC token for an API key that is valid for one hour, so it runs only once the packages are built. Its `user` input is the org variable `NUGET_USER`.
+- **Symbols too.** `dotnet nuget push "./nupkgs/*.nupkg"` also pushes the `.snupkg` next to each `.nupkg` to the nuget.org symbol server, with the same key.
+- **Safe to repeat.** Runs are serialized and pushes use `--skip-duplicate`. To publish an existing release again, for example after a failed push, run **NuGet Publish** from the Actions tab with the anchor package's release tag.
 
-on:
-  release:
-    types: [published]
+> **Key detail:** The workflow deletes every `package.json` before packing, so none ends up inside a `.nupkg`. Leave the generated `CHANGELOG.md` files alone: `changesets/action` reads the entry for the released version out of the `CHANGELOG.md` beside each tagged `package.json` to build the GitHub Release body, and errors if the file exists without a matching entry.
 
-jobs:
-  publish:
-    name: Publish to NuGet
-    runs-on: ubuntu-latest
-    permissions:
-      packages: write
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+### Trusted publishing on nuget.org
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v6
+nuget.org trusts the workflow through a [trusted publishing policy](https://learn.microsoft.com/nuget/nuget-org/trusted-publishing). The account named in the org variable `NUGET_USER` creates it on nuget.org under its user name → **Trusted Publishing**:
 
-      - name: Extract version from tag
-        id: version
-        run: |
-          # Tag format: @scope/pkg@1.2.3
-          TAG="${GITHUB_REF_NAME}"
-          VERSION="${TAG##*@}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+| Field            | Value                                                            |
+| ---------------- | ---------------------------------------------------------------- |
+| Package owner    | `collana-solutions`                                              |
+| Repository owner | `collana-solutions`                                              |
+| Repository       | the repository name, for example `Csag.Blueprint`                |
+| Workflow file    | `nuget-publish.yml` (the file name only)                         |
+| Environment      | `production`                                                     |
+| Packages         | a glob of the repo's package IDs, for example `Csag.Blueprint.*` |
 
-          # Extract package name to find the right .csproj
-          PKG_NAME=$(echo "$TAG" | sed 's/@[^/]*\///' | sed 's/@.*//')
-          echo "package=$PKG_NAME" >> "$GITHUB_OUTPUT"
+- **`NUGET_USER`** is an org variable (not a secret) that holds the nuget.org profile name of the member of the `collana-solutions` nuget.org organization who owns the policies. `NuGet/login` sends it along with the OIDC token. If that account leaves the organization, its policies become inactive. Moving the policies to another account means recreating them there and changing this one variable.
+- **The package owner has to own the package IDs.** A policy covers only packages that its package owner owns. If `collana-solutions` does not own an existing ID, the login works but the push returns HTTP 403. Add `collana-solutions` as an owner of every existing ID before the first trusted publish.
+- **A repository rename needs a policy edit.** The policy matches the repository owner and name as well as their numeric GitHub IDs. A rename keeps the IDs but changes the name, so edit the policy right after renaming the repository.
 
-      - name: Delete package.json from project
-        run: |
-          # Remove package.json so it doesn't leak into the NuGet package
-          find packages/ -name "package.json" -delete
+### Package metadata
 
-      - name: Pack
-        run: |
-          dotnet pack packages/${{ steps.version.outputs.package }} \
-            -p:Version=${{ steps.version.outputs.version }} \
-            -c Release \
-            -o ./nupkgs
+The packages need a project URL, a README, an icon, symbols and Source Link. Put the shared part into `Directory.Build.props` at the repository root and merge this block into the existing file:
 
-      - name: Push to GitHub Packages
-        run: |
-          dotnet nuget add source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" \
-            --name github \
-            --username ${{ github.repository_owner }} \
-            --password ${{ secrets.GITHUB_TOKEN }} \
-            --store-password-in-clear-text
-          dotnet nuget push ./nupkgs/*.nupkg --source github
+```xml
+<PropertyGroup>
+  <!-- Deterministic builds with normalized source paths, in CI only. Local builds keep real paths for debugging. -->
+  <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+</PropertyGroup>
+
+<!-- Package metadata shared by every packable project. -->
+<PropertyGroup>
+  <Authors>collana solutions AG</Authors>
+  <Company>collana solutions AG</Company>
+  <PackageLicenseExpression>MIT</PackageLicenseExpression>
+  <PackageReadmeFile>README.md</PackageReadmeFile>
+  <PackageIcon>icon.png</PackageIcon>
+  <!-- CUSTOMIZE: the repository URL. -->
+  <PackageProjectUrl>https://github.com/collana-solutions/YOUR-REPO</PackageProjectUrl>
+  <RepositoryUrl>https://github.com/collana-solutions/YOUR-REPO</RepositoryUrl>
+  <RepositoryType>git</RepositoryType>
+  <!-- Source Link: the repository URL and commit go into the package, files outside git into the PDB. -->
+  <PublishRepositoryUrl>true</PublishRepositoryUrl>
+  <EmbedUntrackedSources>true</EmbedUntrackedSources>
+  <!-- A .snupkg symbol package next to every .nupkg. -->
+  <IncludeSymbols>true</IncludeSymbols>
+  <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+</PropertyGroup>
+
+<ItemGroup>
+  <!-- Relative to each project, so every packed project brings its own README.md. -->
+  <None Include="README.md" Pack="true" PackagePath="\" />
+  <!-- One icon at the repository root for all packages. -->
+  <None Include="$(MSBuildThisFileDirectory)icon.png" Pack="true" PackagePath="\" Visible="false" />
+</ItemGroup>
 ```
 
-> **Key detail:** The `find packages/ -name "package.json" -delete` step removes all `package.json` files before packing so they don't end up inside the `.nupkg`. Leave the generated `CHANGELOG.md` files alone — `changesets/action` reads the entry for the released version out of the `CHANGELOG.md` beside each tagged `package.json` to build the GitHub Release body, and errors if the file exists without a matching entry.
+- The .NET 8 SDK and later include Source Link for GitHub, so no package reference is needed.
+- Use the collana-solutions package icon, for example `icon.png` from Csag.Blueprint.
+- A project that ships only as an analyzer or source generator has no library symbols to pack. Set `<IncludeSymbols>false</IncludeSymbols>` in that project, otherwise pack fails with NU5017.
+- `Description` and `PackageTags` belong in each project.
+- Test, sample and demo projects must not be packed. Test projects set `<IsPackable>false</IsPackable>` through the test SDK, other projects need it set explicitly.
 
 ### Dependabot changesets for NuGet
 
-The template's [Dependabot Changeset](#dependabot-automation) workflow decides between a real bump and an empty changeset by looking for changed `packages/*/package.json` files. In a NuGet repo those files are version-tracking stubs that Dependabot never touches, so every NuGet update would get an empty changeset and never ship. Point the detect step at the files that do change instead:
+The npm template's [Dependabot Changeset](#dependabot-automation) workflow decides between a real bump and an empty changeset by looking for changed `packages/*/package.json` files. In a NuGet repo those files are version-tracking stubs that Dependabot never touches. The NuGet template's detect step watches the files that do change a shipped package:
 
-```yaml
-- name: Detect package-affecting changes
-  id: detect-changes
-  if: steps.check-changeset.outputs.exists == 'false'
-  run: |
-      # A shipped NuGet package is affected when its declared dependencies
-      # (a csproj or the central Directory.Packages.props) or its resolved
-      # dependency graph (packages.lock.json) change. Any Dependabot update
-      # that touches none of these (root npm dev-deps, GitHub Actions, other
-      # tooling) ships no code and gets an empty changeset instead.
-      CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'packages/*/*.csproj' 'packages/*/packages.lock.json' 'Directory.Packages.props')
-      if [ -n "$CHANGED" ]; then
-        echo "changed=true" >> "$GITHUB_OUTPUT"
-        echo "Package-affecting files changed:"
-        echo "$CHANGED"
-      else
-        echo "changed=false" >> "$GITHUB_OUTPUT"
-        echo "No package-affecting changes detected (tooling-only update)"
-      fi
-```
+- the `.csproj` of a packed project,
+- its `packages.lock.json`, the resolved dependency graph,
+- `Directory.Packages.props`, the central package versions.
 
-Adjust the `packages/*` paths to where your projects live. Keep the step's `id` and output name, because the **Generate changeset** step passes the result to the script as `WORKSPACE_PACKAGES_CHANGED`.
+Any other Dependabot update (root npm tooling, GitHub Actions) gets an empty changeset. Adjust the `packages/*` paths to where the packed projects live. Keep the step's `id` and output name, because the **Generate changeset** step passes the result to the script as `WORKSPACE_PACKAGES_CHANGED`. The monthly `refresh-lockfiles.yml` applies the same rule to the lock files it refreshes.
 
 ### What stays the same
 
 Everything documented in this guide works identically for NuGet repos:
 
-- Contributors run `npx changeset` to add changeset files
+- Contributors run `pnpm changeset` to add changeset files
 - CI blocks PRs without changesets
 - The Version Packages PR shows version bumps and changelog updates
 - Prereleases, backporting, and fixed packages all work the same
-- The only differences are the additional `nuget-publish.yml` workflow that runs after each GitHub Release and the Dependabot detection paths above
+- The differences are the version sync script, the `nuget-publish.yml` and `nuget-preview.yml` workflows, and the Dependabot detection paths above
+
+---
+
+## Publishing to GitHub Packages
+
+Only test packages (`pkg-a`, `pkg-b`, `release-process-test`) still publish to GitHub Packages. GitHub Packages has no trusted publishing, so such a repo differs from the templates:
+
+- **npm:** `.npmrc` routes the scope there (`@collana-solutions:registry=https://npm.pkg.github.com`), and `"access"` has no effect, because visibility comes from the repository and package settings. Without an OIDC credential to isolate, `release.yml` needs no job split. A single job modeled on the template's `backport` job is enough, with `packages: write` instead of `id-token: write`, no environment, `registry-url: https://npm.pkg.github.com` on `actions/setup-node`, `NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}` on the changesets step, and `--tag release-vN` on `release/**` branches only.
+- **NuGet:** `nuget-publish.yml` gets `packages: write` instead of `id-token: write` and no environment, drops `NuGet/login`, and pushes with `GITHUB_TOKEN` to `https://nuget.pkg.github.com/collana-solutions/index.json`.
+- **Consumers** need a token with `read:packages`, even for public packages.
+
+---
+
+## Workflow security conventions
+
+Both templates follow these rules, and so should every workflow an adopting repo adds. The `zizmor` job in `ci.yml` enforces most of them.
+
+- **Pin every action to a full commit SHA, with the exact version as a comment:** `uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`. Dependabot then updates the SHA and the comment together. Pick the newest release that is older than 30 days, the Dependabot cooldown for actions. Sub-actions such as `changesets/action/publish` use the same SHA as their parent action.
+- **`permissions: {}` at the top of every workflow,** and each job lists only what it needs. A job that does everything with an App token needs no `GITHUB_TOKEN` permission at all.
+- **No `${{ }}` inside scripts.** Values reach `run:` and `actions/github-script` through `env:` and are read as `"$NAME"` or `process.env.NAME`. An expression inside a script is substituted before the script runs, so a crafted branch name or PR title would become code.
+- **`persist-credentials: false` on every checkout.** A job that pushes passes its token explicitly (`git push "https://x-access-token:${APP_TOKEN}@github.com/${REPOSITORY}.git" ...`) instead of keeping it in the git config. The exception is a checkout for `changesets/action` with `push-with-git-cli: true`, which pushes with the stored credentials. It carries `# zizmor: ignore[artipacked]` with the reason, and its job uploads no artifact.
+- **A `zizmor` job in `ci.yml`,** named `zizmor` so the branch ruleset can require it, with `advanced-security: false` so a finding fails the check instead of only landing in code scanning. Every ignore carries its reason, inline as `# zizmor: ignore[<audit>] <reason>` or in `.github/zizmor.yml`.
+- **No dependency cache in release jobs.** Every job that versions or publishes sets `package-manager-cache: false` on `actions/setup-node`, so it never restores a cache that a pull request run could have written (zizmor's `cache-poisoning` audit).
+- **No install scripts where nothing is built.** Jobs that only run the changesets CLI install with `pnpm install --frozen-lockfile --ignore-scripts`. Jobs that build allow only the install scripts listed under `allowBuilds` in `pnpm-workspace.yaml`.
+- **Check Dependabot by PR author:** `github.event.pull_request.user.login == 'dependabot[bot]'`, never `github.actor`. The actor is whoever triggered the run, for example by pushing to a Dependabot branch.
+- **App tokens with explicit permissions.** Every `actions/create-github-app-token` step lists `permission-*` inputs, for example `permission-contents: write`, so the token gets only those instead of everything the App may do.
+- **Publishing jobs run in the environment `production`,** whose deployment rules limit which refs reach the registry credential.
+- **Waiting periods for new releases.** Dependabot waits 30 days for GitHub Actions and 14 days for npm and NuGet packages, pnpm refuses package versions younger than 14 days (`minimumReleaseAge: 20160` with `minimumReleaseAgeStrict: true`), and **Refresh lockfiles** re-resolves transitive dependencies once a month within those limits. Security updates skip the cooldown.
+
+Run zizmor locally before pushing. The `zizmor` job uses zizmor-action v0.7.1, which runs zizmor 1.31.1. `GH_TOKEN` enables the online audits, such as the check for action versions with known vulnerabilities:
+
+```bash
+GH_TOKEN=$(gh auth token) zizmor .
+```
+
+---
+
+## Per-repo setup checklist
+
+The settings outside the repository files, in the order they are needed. Settings that would break the workflows a repo runs today (environment rules, SHA pinning) go on only after the PR with the templates is merged.
+
+**Already in place at org level:** the `csag-changesets-bot` GitHub App, the `CHANGESETS_BOT_CLIENT_ID` and `CHANGESETS_BOT_PRIVATE_KEY` secrets for Actions and for Dependabot, the `FEEDZ_TOKEN` secret and the `NUGET_USER` variable. Check that the App is installed on the repository and that the repository has access to the secrets and the variable.
+
+**Before the template PR, so its previews work:**
+
+- [ ] npm: install the [pkg.pr.new App](https://github.com/apps/pkg-pr-new) on the repository.
+- [ ] NuGet: create the feedz.io feed, named after the repository in lowercase with dots as dashes, readable without credentials, with a retention rule of 30 days. Set its URL as `FEED_URL` in `nuget-preview.yml`. See [Testing before release](#testing-before-release).
+
+**Right after the template PR is merged:**
+
+- [ ] **Environment `production`** (Settings → Environments), with deployment rules:
+  - NuGet: tags `@collana-solutions/*` and the branch `main`. Releases run on tags, and a manual **NuGet Publish** runs from `main`.
+  - npm: the branches `main` and `release/**`.
+- [ ] **Tag ruleset** for `@collana-solutions/*`: restrict creations, updates and deletions. Only the changesets App and repository admins may bypass it.
+- [ ] **Branch ruleset** for `main` and `release/**`: require a pull request and the status checks **Changeset Check**, the CI build check (**Verify** for npm, **Build, Test & Pack** for NuGet) and **zizmor**.
+- [ ] **"Require actions to be pinned to a full-length commit SHA"** (Settings → Actions → General). It also checks the actions that other actions use.
+- [ ] **Immutable releases** (Settings → General → Releases). A published release's tag can then no longer be moved or deleted. Deleting the release frees the tag, but its name can never be used again.
+
+**Before the first release:**
+
+- [ ] NuGet: the [nuget.org trusted publishing policy](#trusted-publishing-on-nugetorg), and `collana-solutions` as owner of every existing package ID.
+- [ ] npm: the [`npm trust` loop](#connecting-the-trusted-publisher) for every package, right before merging the Version Packages PR, because a new configuration has to publish within 2 days.
+
+**After the first trusted publish:**
+
+- [ ] npm: every package set to "Require two-factor authentication and disallow tokens", and the npm token secrets deleted.
+- [ ] NuGet: the API key secrets the old workflows used deleted, and the keys revoked on nuget.org.
 
 ---
 
@@ -1017,7 +1161,7 @@ Existing repos on Changesets v2 need a handful of coordinated changes. Do them i
 Changesets v3 requires:
 
 - **Node.js** `^22.11 || ^24 || >=26`
-- **npm** `>=10.9.0`, **pnpm** `>=10.0.0`, or **Yarn** `>=4.5.2` (Yarn Classic is no longer supported)
+- **npm** `>=10.9.0`, **pnpm** `>=10.0.0`, or **Yarn** `>=4.5.2` (Yarn Classic is no longer supported, so a Yarn Classic repo [moves to pnpm](#step-1-move-to-pnpm) first)
 
 Bump `node-version` in every workflow that runs the CLI (`ci.yml`, `release.yml`, `dependabot-changeset.yml`) and in any `.nvmrc` or `engines` field. Bolt workspaces are no longer detected at all — migrate to npm, pnpm, or Yarn workspaces first.
 
@@ -1026,7 +1170,7 @@ Bump `node-version` in every workflow that runs the CLI (`ci.yml`, `release.yml`
 ### Step 2: Update the packages
 
 ```bash
-npm install -D @changesets/cli@^3 @changesets/changelog-github@^1
+pnpm add -D -w @changesets/cli@^3 @changesets/changelog-github@^1
 ```
 
 All `@changesets/*` packages now ship as **ES modules** — there is no CommonJS entry point left. If you only invoke `changeset` from npm scripts or CI, that changes nothing. A CommonJS custom changelog generator still loads, because Changesets imports it dynamically, but no file anywhere can `require()` a `@changesets/*` package any more; convert those to ESM.
@@ -1072,10 +1216,10 @@ Four behavior changes are worth knowing about:
 
 - Release commits and tags are pushed through the **GitHub API** by default, so they are signed with GitHub's GPG key and attributed to whoever owns `github-token`. Set `push-with-git-cli: true` to push with the Git CLI instead.
 - Git tags are now controlled separately by `push-git-tags` (default `true`). Setting `create-github-releases: false` no longer suppresses tags as a side effect — turn `push-git-tags` off explicitly if that is what you relied on.
-- The action no longer writes an `.npmrc` when `NPM_TOKEN` is set. Registry auth has to come from `actions/setup-node`'s `registry-url` plus `NODE_AUTH_TOKEN`, which is what [`templates/.github/workflows/release.yml`](../templates/.github/workflows/release.yml) does.
-- Published packages are no longer detected by scraping `changeset publish` stdout; the CLI writes them to the file named by the `CHANGESETS_OUTPUT` environment variable. A plain `publish-script: npx changeset publish` handles that itself, but a **wrapper script** has to pass `CHANGESETS_OUTPUT` through to the CLI it calls — otherwise the action merely warns, and skips the git tags and GitHub Releases.
+- The action no longer writes an `.npmrc` when `NPM_TOKEN` is set. Registry auth has to come from elsewhere: the npm template uses trusted publishing with a committed `.npmrc` (see [Publishing to public npm](#publishing-to-public-npm)), and a token-based setup uses `actions/setup-node`'s `registry-url` plus `NODE_AUTH_TOKEN`.
+- Published packages are no longer detected by scraping `changeset publish` stdout. The CLI writes them to the file named by the `CHANGESETS_OUTPUT` environment variable. A plain `publish-script: pnpm changeset publish` handles that itself, but a **wrapper script** has to pass `CHANGESETS_OUTPUT` through to the CLI it calls, otherwise the action merely warns, and skips the git tags and GitHub Releases.
 
-The v2 action also exposes sub-actions (`select-mode`, `version`, `pack`, `publish`, `pr-status`, `pr-comment`) so a release workflow can be split across jobs and grant `id-token: write` only where it publishes. The single combined `changesets/action@v2` step used in [`templates/`](../templates/) remains supported. Two notes if you go the sub-action route: pin `@v2` rather than `@v2.0.0` (the `cwd` input was dropped in `v2.0.0` and restored in `v2.1.0`), and remember that `changesets/action/version` calls `changeset version` unconditionally, so it runs into the new exit-code-1 behavior on an empty release unless `select-mode` gates it.
+The v2 action also exposes sub-actions (`select-mode`, `version`, `pack`, `publish`, `pr-status`, `pr-comment`) so a release workflow can be split across jobs and grant `id-token: write` only where it publishes. The npm template uses them (see [Release job layout](#release-job-layout)). The single combined `changesets/action@v2` step, which the NuGet template and the npm `backport` job use, remains supported. Two notes if you go the sub-action route: pin the sub-actions to the same commit SHA as `changesets/action`, from `v2.1.0` or later (the `cwd` input was dropped in `v2.0.0` and restored in `v2.1.0`), and remember that `changesets/action/version` calls `changeset version` unconditionally, so it runs into the new exit-code-1 behavior on an empty release unless `select-mode` gates it.
 
 ### Step 5: Update CLI commands and flags
 
@@ -1083,14 +1227,14 @@ The v2 action also exposes sub-actions (`select-mode`, `version`, `pack`, `publi
 
 Stale **flags** do break immediately. v3 parses arguments with a library that rejects anything it doesn't recognize, so `--sinceMaster`, `--updateChangelog`, `--isPublic`, `--skipCI`, and `--commit` now fail the command outright instead of printing a deprecation warning. Grep your workflows and package scripts for them; `changeset status --sinceMaster` becomes `changeset status --since=main`.
 
-`--since` still accepts any git ref rather than only a local branch name, so the `--since=origin/<base>` used by [`templates/.github/workflows/ci.yml`](../templates/.github/workflows/ci.yml) keeps working.
+`--since` still accepts any git ref rather than only a local branch name, so the `--since=origin/<base>` used by the templates' `ci.yml` keeps working.
 
 ### Step 6: Migrate prerelease state
 
 Only relevant if the branch you're upgrading is currently in prerelease mode. Run:
 
 ```bash
-npx changeset status
+pnpm changeset status
 ```
 
 Changesets moves the already-versioned changesets from `.changeset/` into `.changeset/pre/`, and drops their IDs and the removed `initialVersions` key from `.changeset/pre.json`. Commit the result. See [Prereleases](#prereleases--release-candidates) for how the directory is used from here on.
@@ -1110,48 +1254,46 @@ Changesets moves the already-versioned changesets from `.changeset/` into `.chan
 
 ## Migration Guide
 
-This guide walks through adopting changesets in an existing repository that previously used a different release workflow (manual versioning, semantic-release, Nerdbank.GitVersioning, etc.).
+This guide walks through adopting changesets in an existing repository that previously used a different release workflow (manual versioning, semantic-release, release-it, Nerdbank.GitVersioning, etc.).
 
-> Already using Changesets v2? You don't need this section — go to [Upgrading from Changesets v2](#upgrading-from-changesets-v2) instead.
+> Already using Changesets v2? Go to [Upgrading from Changesets v2](#upgrading-from-changesets-v2) instead, then replace the workflows with the current templates as in [Step 5](#step-5-copy-the-template-variant).
 
 ### Prerequisites
 
-- Node.js `^22.11 || ^24 || >=26` and npm `>=10.9.0` (pnpm `>=10.0.0` / Yarn `>=4.5.2`) — needed for the changesets CLI, even in .NET repos
+- Node.js 24 and Corepack, which installs the pnpm version the repo pins. The changesets CLI needs them even in .NET repos.
 - Repository uses GitHub and GitHub Actions
-- You have admin access to the repo (for branch protection and secrets)
+- You have admin access to the repo (for rulesets, environments and the Actions settings)
+- NuGet repos: a `global.json` that pins the .NET SDK, and NuGet lock files (`<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>`), because the workflows restore with `--locked-mode`
 
-### Step 1: Install changesets
+### Step 1: Move to pnpm
 
-```bash
-npm init -y  # if no package.json exists yet
-npm install -D @changesets/cli@^3 @changesets/changelog-github@^1
-```
+Both templates use pnpm 11, and Changesets v3 no longer supports Yarn Classic. Copy the variant's `packageManager` field and its `changeset`, `version-packages` and `release` scripts into the root `package.json`, copy its `pnpm-workspace.yaml` next to it, and run `corepack enable`. A NuGet repo without a root `package.json` copies the whole file.
 
-For monorepos, configure workspaces in the root `package.json`:
+**Converting from Yarn or npm.** `pnpm import` turns the existing lockfile into `pnpm-lock.yaml`, so the dependency versions stay as they are:
 
-```json
-{
-  "private": true,
-  "workspaces": ["packages/*"],
-  "devDependencies": {
-    "@changesets/cli": "^3.0.0",
-    "@changesets/changelog-github": "^1.0.0"
-  },
-  "scripts": {
-    "changeset": "changeset",
-    "version-packages": "changeset version",
-    "release": "changeset publish"
-  }
-}
-```
+1. Create `pnpm-workspace.yaml` from the template, list the workspace directories under `packages`, and delete the `workspaces` field from `package.json`. pnpm reads the workspace only from `pnpm-workspace.yaml`.
+2. Set `"packageManager": "pnpm@11.22.0"` in the root `package.json` and run `corepack enable`.
+3. Run `pnpm import`. It reads `yarn.lock` or `package-lock.json` and writes `pnpm-lock.yaml`.
+4. Delete `yarn.lock`, `package-lock.json`, `.yarnrc` and `.yarnrc.yml`, then run `pnpm install`.
+5. Move `resolutions` (Yarn) or `overrides` (npm) from `package.json` to `overrides` in `pnpm-workspace.yaml`.
+6. Replace `yarn`, `npm run` and `npx` in the package scripts, the workflows and the README with `pnpm`, `pnpm run` and `pnpm exec`.
+7. Build and test. pnpm does not hoist undeclared dependencies, so a package that imports something it does not declare fails now. Declare the dependency. pnpm also runs no dependency install scripts except those listed under `allowBuilds` in `pnpm-workspace.yaml`, so list what the build needs there.
 
-### Step 2: Configure changesets
+### Step 2: Install changesets
 
 ```bash
-npx changeset init
+pnpm add -D -w @changesets/cli@^3 @changesets/changelog-github@^1
 ```
 
-This prompts for the changelog generator, commit behavior, publish access, and base branch, then writes `.changeset/config.json` and `.changeset/README.md`. Because it is interactive it cannot run unattended — in a scripted bootstrap, drop in a config file directly instead. Either way the result should end up looking like this:
+`-w` adds them to the workspace root. The npm template's root `package.json` also lists `pkg-pr-new` for the [preview workflow](#pkgprnew-npm).
+
+### Step 3: Configure changesets
+
+```bash
+pnpm changeset init
+```
+
+This prompts for the changelog generator, commit behavior, publish access, and base branch, then writes `.changeset/config.json` and `.changeset/README.md`. Because it is interactive it cannot run unattended. Replace the generated `config.json` with the variant's [`templates/npm/.changeset/config.json`](../templates/npm/.changeset/config.json) or [`templates/nuget/.changeset/config.json`](../templates/nuget/.changeset/config.json). For npm it looks like this:
 
 ```json
 {
@@ -1162,7 +1304,7 @@ This prompts for the changelog generator, commit behavior, publish access, and b
   ],
   "commit": false,
   "fixed": [],
-  "access": "restricted",
+  "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
   "ignore": []
@@ -1170,83 +1312,74 @@ This prompts for the changelog generator, commit behavior, publish access, and b
 ```
 
 Adjust as needed:
-- **`fixed`**: Add package groups that should always share the same version (e.g., `[["@org/pkg-a", "@org/pkg-b"]]`)
-- **`access`**: Use `"restricted"` for GitHub Packages, `"public"` for npm public packages
+- **`fixed`**: Add package groups that should always share the same version (e.g., `[["@collana-solutions/pkg-a", "@collana-solutions/pkg-b"]]`). The Dependabot changeset script bumps this group, so put a single package into a one-element group.
+- **`access`**: `"public"` for npm. NuGet repos keep the template's value, which has no effect on private packages.
 - **`baseBranch`**: `main` is the default, so this line is optional — set it if your default branch is something else
-- **`privatePackages`**: Add `{ "version": true, "tag": true }` if your packages are `"private": true` and you still want them versioned and tagged (see [Adapting for NuGet Packages](#adapting-for-nuget-packages))
+- **`privatePackages`**: NuGet repos need `{ "version": true, "tag": true }`, see [Adapting for NuGet Packages](#adapting-for-nuget-packages)
 - **`format`**: Defaults to `"auto"`, which picks up Prettier, Oxfmt, Deno, or dprint from your project. Set it to `false` to leave generated files unformatted
 
-### Step 3: Set the initial version
+### Step 4: Set the initial version
 
 Each package's `package.json` must have the **current published version**. If your package is currently at `3.2.1`, make sure `package.json` says `"version": "3.2.1"`. Changesets increments from whatever version is in `package.json`.
 
 For .NET repos, also ensure the `package.json` version matches the `.csproj` `<Version>`.
 
-### Step 4: Add workflows
+### Step 5: Copy the template variant
 
-Copy the CI and Release workflows from [`templates/`](../templates/):
+Copy the contents of [`templates/npm/`](../templates/npm/) or [`templates/nuget/`](../templates/nuget/) into the repository root and customize every spot marked `CUSTOMIZE` or `YOUR-…`. [`templates/README.md`](../templates/README.md) lists them per file. Then:
 
-- `.github/workflows/ci.yml` — changeset check on PRs
-- `.github/workflows/release.yml` — Version Packages PR + publish
+- Replace any `.npmrc` that routes the scope to GitHub Packages with the template's `.npmrc` (npm).
+- Merge the [package metadata block](#package-metadata) into `Directory.Build.props`, and add a "Preview packages" section to the README that the preview comment links to (NuGet).
+- Run zizmor locally (see [Workflow security conventions](#workflow-security-conventions)) on the result, including any workflow of the repo that does not come from the templates.
 
-For **public npm** instead of GitHub Packages, follow [Publishing to public npm](#publishing-to-public-npm) (it's more than just the registry URL). For NuGet repos, also add the `nuget-publish.yml` workflow (see [Adapting for NuGet Packages](#adapting-for-nuget-packages)).
+### Step 6: Set up the GitHub App
 
-Add `.npmrc` if using GitHub Packages:
+The workflows authenticate as the `csag-changesets-bot` GitHub App, so that the PRs, commits and releases they create start other workflows. The App and its secrets exist at org level. A repo only needs the App installed and access to the `CHANGESETS_BOT_CLIENT_ID` and `CHANGESETS_BOT_PRIVATE_KEY` secrets, for Actions and for Dependabot.
 
-```
-@neolution-ch:registry=https://npm.pkg.github.com
-```
+For a new organization, the setup is:
 
-> **Important:** `.npmrc` takes precedence over the workflow's `registry-url` and auth token. If you switch to public npm, you must remove or repoint this line — otherwise `changeset publish` silently keeps publishing to GitHub Packages.
-
-### Step 5: Set up the GitHub App
-
-The Release workflow uses a GitHub App token so that Version Packages PRs trigger CI. This is a one-time org-level setup:
-
-1. Create a GitHub App at `https://github.com/organizations/collana-solutions/settings/apps`
+1. Create a GitHub App at `https://github.com/organizations/<org>/settings/apps`
    - **Permissions:** Contents (Read & write), Pull requests (Read & write)
    - **Webhook:** Disabled
-2. Generate a private key and note the App ID
-3. Install the App on the repository (or all org repos)
-4. Add secrets (org-level recommended for reuse across repos). The `templates/` workflows reference these names — use the same, or update both to match:
-   - `CHANGESETS_BOT_CLIENT_ID`
-   - `CHANGESETS_BOT_PRIVATE_KEY`
+2. Generate a private key and note the Client ID
+3. Install the App on the repositories that release
+4. Add `CHANGESETS_BOT_CLIENT_ID` and `CHANGESETS_BOT_PRIVATE_KEY` as org secrets, both for Actions and for Dependabot
 
-### Step 6: Configure branch protection
+### Step 7: Configure the repository
 
-1. Go to **Settings** → **Branches** → **Add rule**
-2. Branch name pattern: `main`
-3. Enable **Require status checks to pass before merging**
-4. Add the **Changeset Check** status check
-5. (Recommended) Enable **Require branches to be up to date before merging**
+Work through the [Per-repo setup checklist](#per-repo-setup-checklist): previews, the `production` environment, the rulesets, SHA pinning, immutable releases and the trust connection to the registry.
 
-> **Note:** The Changeset Check status won't appear in the list until the CI workflow has run at least once. You can either add it after the first PR, or temporarily skip this step.
+> **Note:** A status check can be added to the branch ruleset only after it has run at least once, so add the rulesets after the first CI run on the template PR.
 
-### Step 7: Remove old release tooling
+### Step 8: Remove old release tooling
 
 Remove whatever you were using before:
 
 | Previous tool                        | What to remove                                                                                                         |
 | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
 | **semantic-release**                 | `.releaserc`, `@semantic-release/*` packages, release workflow steps                                                   |
+| **release-it**                       | `.release-it.json`, `release-it` and its plugins, release workflow steps                                               |
 | **Nerdbank.GitVersioning**           | `version.json`, `nbgv` tool references, `Nerdbank.GitVersioning` NuGet package                                         |
 | **MinVer**                           | `MinVer` NuGet package from `.csproj`                                                                                  |
 | **Manual versioning**                | Any scripts or CI steps that bump versions                                                                             |
+| **Registry tokens**                  | `NPM_TOKEN` and NuGet API key secrets, once the first trusted publish worked                                           |
+| **Yarn or npm**                      | `yarn.lock`, `package-lock.json`, `.yarnrc`, `.yarnrc.yml`, `workspaces` in `package.json`                             |
 | **Conventional commits enforcement** | `commitlint`, `husky` commit hooks (optional — you can keep them for commit hygiene, but changesets doesn't need them) |
 
-### Step 8: First changeset
+### Step 9: First changeset
 
 Create a PR with any change and add a changeset:
 
 ```bash
-npx changeset
+pnpm changeset
 # Select your package(s), choose the bump type, write a description
 ```
 
 Push and verify:
-- CI passes with the changeset check
+- CI passes with the changeset check, the build check and zizmor
+- The preview workflow publishes a preview of the PR
 - After merging, the Release workflow creates a Version Packages PR
-- Merging the Version Packages PR publishes the package
+- Merging the Version Packages PR publishes the package through trusted publishing
 
 Once this works end-to-end, the migration is complete. All the scenarios documented in this guide (prereleases, backporting, etc.) are now available.
 
@@ -1258,75 +1391,80 @@ Once this works end-to-end, the migration is complete. All the scenarios documen
 
 The changesets config lives at `.changeset/config.json`:
 
-| Option                       | Value                                              | Meaning                                                                                                                                                                                                                               |
-| ---------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `changelog`                  | `@changesets/changelog-github`                     | Changelogs include PR links and contributor attribution. The `repo` option defaults to `$GITHUB_REPOSITORY`, so it only strictly matters when running `changeset version` outside Actions — keep it set so local runs behave the same |
-| `commit`                     | `false`                                            | Changeset commands don't auto-commit                                                                                                                                                                                                  |
-| `fixed`                      | `[["@neolution-ch/pkg-a", "@neolution-ch/pkg-b"]]` | Both packages always share the same version                                                                                                                                                                                           |
-| `access`                     | `restricted`                                       | npm CLI publish flag. On npmjs.org `restricted` = private, `public` = public; **ignored by GitHub Packages** (visibility is set by repo/package settings). See [Publishing to public npm](#publishing-to-public-npm).                 |
-| `baseBranch`                 | `main`                                             | Comparisons are made against `main`. `main` is also the default, so the line can be omitted                                                                                                                                           |
-| `updateInternalDependencies` | `patch`                                            | Internal dependency ranges are updated on every release                                                                                                                                                                               |
-| `format`                     | _(unset → `"auto"`)_                               | Formatter for generated changesets and changelogs. `"auto"` detects Prettier, Oxfmt, Deno, or dprint; `false` disables formatting                                                                                                     |
-| `privatePackages`            | _(unset → `{ "version": false, "tag": false }`)_   | Whether `"private": true` packages are versioned and tagged. Set `{ "version": true, "tag": true }` for repos that version packages they don't publish to npm                                                                         |
+| Option                       | Value                                                        | Meaning                                                                                                                                                                                                                               |
+| ---------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `changelog`                  | `@changesets/changelog-github`                               | Changelogs include PR links and contributor attribution. The `repo` option defaults to `$GITHUB_REPOSITORY`, so it only strictly matters when running `changeset version` outside Actions, but keep it set so local runs behave the same |
+| `commit`                     | `false`                                                      | Changeset commands don't auto-commit                                                                                                                                                                                                  |
+| `fixed`                      | `[["@collana-solutions/pkg-a", "@collana-solutions/pkg-b"]]` | Both packages always share the same version                                                                                                                                                                                           |
+| `access`                     | `public` (npm template)                                      | npm CLI publish flag. On npmjs.org `restricted` = private and `public` = public. It has no effect on the private packages of a NuGet repo, and GitHub Packages ignores it. See [Publishing to public npm](#publishing-to-public-npm). |
+| `baseBranch`                 | `main`                                                       | Comparisons are made against `main`. `main` is also the default, so the line can be omitted                                                                                                                                           |
+| `updateInternalDependencies` | `patch`                                                      | Internal dependency ranges are updated on every release                                                                                                                                                                               |
+| `format`                     | _(unset → `"auto"`)_                                         | Formatter for generated changesets and changelogs. `"auto"` detects Prettier, Oxfmt, Deno, or dprint, and `false` disables it                                                                                                         |
+| `privatePackages`            | _(unset → `{ "version": false, "tag": false }`)_             | Whether `"private": true` packages are versioned and tagged. The NuGet template sets `{ "version": true, "tag": true }`, because it versions packages it never publishes to npm                                                       |
 
 ### CI Workflows
 
-| Workflow                 | File                                         | Trigger                                  | Purpose                                         |
-| ------------------------ | -------------------------------------------- | ---------------------------------------- | ----------------------------------------------- |
-| **CI**                   | `.github/workflows/ci.yml`                   | Pull requests to `main` and `release/**` | Blocks PRs without a changeset                  |
-| **Release**              | `.github/workflows/release.yml`              | Push to `main` and `release/**`          | Creates Version Packages PR; publishes on merge |
-| **Dependabot Changeset** | `.github/workflows/dependabot-changeset.yml` | Pull requests from Dependabot            | Auto-generates changeset for dependency updates |
+| Workflow                        | File                              | Variant | Trigger                                                     | Purpose                                                                  |
+| ------------------------------- | --------------------------------- | ------- | ----------------------------------------------------------- | ------------------------------------------------------------------------ |
+| **CI**                          | `ci.yml`                          | both    | Pull requests to `main` and `release/**` (npm also manual)  | Changeset Check, build and tests, zizmor                                 |
+| **Release**                     | `release.yml`                     | both    | Push to `main` and `release/**`                             | Version Packages PR, then publish (npm) or tags and GitHub Releases (NuGet) |
+| **NuGet Publish**               | `nuget-publish.yml`               | NuGet   | GitHub Release published, manual with a release tag         | Pushes every package to nuget.org                                        |
+| **PKG PR New**                  | `pkg.pr.new.yml`                  | npm     | Pull requests, push to `main`, manual                       | Preview packages on pkg.pr.new                                           |
+| **NuGet Preview**               | `nuget-preview.yml`               | NuGet   | Pull requests to `main` and `release/**`                    | Preview packages on the feedz.io feed                                    |
+| **Dependabot Changeset**        | `dependabot-changeset.yml`        | both    | Pull requests from Dependabot                               | Auto-generates changeset for dependency updates                          |
+| **Refresh lockfiles**           | `refresh-lockfiles.yml`           | both    | Monthly, manual                                             | Re-resolves transitive dependencies within the declared ranges           |
+| **NuGet Dependency Submission** | `nuget-dependency-submission.yml` | NuGet   | Push to `main`, manual                                      | Submits the resolved NuGet graph to the dependency graph                 |
 
-The Release workflow uses a **GitHub App token** (not `GITHUB_TOKEN`) so that PRs it creates trigger CI checks. It also:
+All files live in `.github/workflows/`. The Release workflow uses a **GitHub App token** (not `GITHUB_TOKEN`) so that PRs it creates trigger CI checks. It also:
 
 - **Publishes backports with a dist-tag** (e.g., `release-v1`) so the `latest` npm tag stays on the highest stable version from `main`
 - **Auto-creates `release/vX.x` branches** when a new major version is published from `main`
 
 ### Branch Protection
 
-For blocking CI to work, configure **branch protection rules** for `main` in GitHub Settings:
-
-1. Go to **Settings** → **Branches** → **Add rule**
-2. Branch name pattern: `main`
-3. Enable **Require status checks to pass before merging**
-4. Search for and add the **Changeset Check** status check
-5. (Recommended) Enable **Require branches to be up to date before merging**
+Protect `main` and `release/**` with a **branch ruleset** (Settings → Rules → Rulesets) that requires a pull request and the status checks **Changeset Check**, the CI build check (**Verify** for npm, **Build, Test & Pack** for NuGet) and **zizmor**. The [Per-repo setup checklist](#per-repo-setup-checklist) lists it together with the tag ruleset and the other settings.
 
 ### Useful Commands
 
 ```bash
 # Add a changeset interactively
-npx changeset
+pnpm changeset
 
 # Add a changeset without prompts
-npx changeset --patch @neolution-ch/pkg-a -m "Fix the thing"
+pnpm changeset --patch @collana-solutions/pkg-a -m "Fix the thing"
 
 # Add an empty changeset (no release)
-npx changeset --empty
+pnpm changeset --empty
 
 # Check if changesets exist (used by CI; exits 1 when a changed package has none)
-npx changeset status --since=origin/main
+pnpm changeset status --since=origin/main
 
 # Preview what versions would be bumped
-npx changeset status --verbose
+pnpm changeset status --verbose
 
 # Apply changesets (bump versions + update changelogs; exits 1 when there is nothing to release)
-npx changeset version
+pnpm changeset version
 
 # Publish packages and create git tags
-npx changeset publish
+pnpm changeset publish
 
 # Create the git tags only, without publishing to a registry
-npx changeset git-tag
+pnpm changeset git-tag
 
 # Write the publish plan to a file instead of publishing
-npx changeset publish-plan --output publish-plan.json
+pnpm changeset publish-plan --output publish-plan.json
 
 # Enter prerelease mode (allowed tags: alpha, beta, rc)
-npx changeset pre enter <alpha|beta|rc>
+pnpm changeset pre enter <alpha|beta|rc>
 
 # Exit prerelease mode
-npx changeset pre exit
+pnpm changeset pre exit
+
+# Connect an npm package to the release workflow (see "Connecting the trusted publisher")
+npm trust github @collana-solutions/pkg-a --repo collana-solutions/<repo> --file release.yml --env production --allow-publish
+
+# Audit the workflows like the zizmor job does
+GH_TOKEN=$(gh auth token) zizmor .
 ```
 
 ### Further Reading
@@ -1341,5 +1479,12 @@ npx changeset pre exit
 - [Beyond npm](https://changesets.dev/guide/beyond-npm) — using changesets for artifacts npm doesn't publish
 - [Migrating from v2 to v3](https://changesets.dev/guide/migration)
 - [Changesets GitHub Action](https://github.com/changesets/action)
+- [npm trusted publishing](https://docs.npmjs.com/trusted-publishers)
+- [nuget.org trusted publishing](https://learn.microsoft.com/nuget/nuget-org/trusted-publishing)
+- [pnpm import](https://pnpm.io/cli/import) and [pnpm settings](https://pnpm.io/settings) (`minimumReleaseAge`, `allowBuilds`)
+- [pkg.pr.new](https://github.com/stackblitz-labs/pkg.pr.new)
+- [feedz.io documentation](https://feedz.io/docs)
+- [zizmor audits](https://docs.zizmor.sh/audits/)
+- [Dependabot cooldown](https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference)
 - [GitHub Packages npm Registry](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry)
 - [GitHub Packages NuGet Registry](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-nuget-registry)

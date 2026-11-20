@@ -1,0 +1,15 @@
+{
+  "$schema": "https://unpkg.com/@changesets/config@4.0.0/schema.json",
+  "changelog": [
+    "@changesets/changelog-github",
+    { "repo": "collana-solutions/YOUR-REPO" }
+  ],
+  "commit": false,
+  "fixed": [["@collana-solutions/YOUR-ANCHOR-PACKAGE", "@collana-solutions/YOUR-PACKAGE-B"]],
+  "linked": [],
+  "access": "restricted",
+  "baseBranch": "main",
+  "updateInternalDependencies": "patch",
+  "ignore": [],
+  "privatePackages": { "version": true, "tag": true }
+}

@@ -1,0 +1,154 @@
+name: Release
+
+# Versions the packages and creates the release tags and GitHub Releases. Nothing goes to
+# npm: every package.json is private and exists only so changesets can track a version.
+# The GitHub Release of the anchor package starts nuget-publish.yml, which pushes to
+# nuget.org.
+on:
+  push:
+    branches:
+      - main
+      - "release/**"
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+permissions: {}
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    # Every write (version PR, release commit, tags, GitHub Releases, release branches) goes
+    # through the App token, so GITHUB_TOKEN only reads.
+    permissions:
+      contents: read
+    steps:
+      # A GitHub App token (not GITHUB_TOKEN), so that the version PR, the release commit and the
+      # GitHub Releases start the workflows they trigger (CI, NuGet Publish).
+      - name: Generate App Token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.CHANGESETS_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.CHANGESETS_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # changesets/action pushes the version branch, tags and releases with its github-token
+      # input, so the checkout keeps no credentials.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # No dependency cache in a release job: a cache written by another workflow must not feed a release.
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      # Activates the pnpm version pinned in package.json's "packageManager".
+      - name: Enable Corepack
+        run: corepack enable
+
+      # The root dependencies are the changesets CLI only, and nothing here needs an install script.
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # scripts/sync-versions.mjs restores the solution so that the version PR also
+      # updates the lock files.
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      # The private packages are only tagged (privatePackages.tag in .changeset/config.json).
+      # No npm dist-tag is passed on release/** branches, because nothing goes to npm.
+      - name: Create Release Pull Request or Publish
+        id: changesets
+        uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          version-script: node scripts/sync-versions.mjs
+          publish-script: pnpm exec changeset publish
+          pr-title: "chore: version packages"
+          commit-message: "chore: version packages"
+
+      - name: Create release branch on major version bump
+        if: steps.changesets.outputs.published == 'true' && github.ref == 'refs/heads/main'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PUBLISHED_PACKAGES: ${{ steps.changesets.outputs.published-packages }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const published = JSON.parse(process.env.PUBLISHED_PACKAGES);
+            if (!published.length) return;
+
+            const newVersion = published[0].version;
+            const newMajor = parseInt(newVersion.split('.')[0], 10);
+
+            // Only act on stable major bumps (not prereleases)
+            if (newVersion.includes('-') || newMajor < 1) return;
+
+            const prevMajor = newMajor - 1;
+            const branchName = `release/v${prevMajor}.x`;
+
+            // Check if the branch already exists
+            try {
+              await github.rest.repos.getBranch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                branch: branchName,
+              });
+              console.log(`Branch ${branchName} already exists, skipping.`);
+              return;
+            } catch (e) {
+              if (e.status !== 404) throw e;
+            }
+
+            // Find the last tag for the previous major version
+            const tags = await github.paginate(github.rest.repos.listTags, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+
+            // Newest stable release of the previous major. Only tags of the packages just
+            // published (or bare vX.Y.Z tags) count, and versions are compared numerically
+            // because the tag list API does not return tags in version order.
+            const publishedNames = new Set(published.map(p => p.name));
+            const prevTag = tags
+              .map(t => {
+                const match = t.name.match(/^(?:(.+)@|v)?(\d+)\.(\d+)\.(\d+)$/);
+                if (!match || (match[1] !== undefined && !publishedNames.has(match[1]))) return null;
+                return { tag: t, version: [match[2], match[3], match[4]].map(Number) };
+              })
+              .filter(c => c && c.version[0] === prevMajor)
+              .sort((a, b) => b.version[1] - a.version[1] || b.version[2] - a.version[2])[0]?.tag;
+
+            if (!prevTag) {
+              console.log(`No tag found for v${prevMajor}, skipping branch creation.`);
+              return;
+            }
+
+            // Create the branch from the previous major's last tag
+            try {
+              await github.rest.git.createRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `refs/heads/${branchName}`,
+                sha: prevTag.commit.sha,
+              });
+              console.log(`Created ${branchName} from tag ${prevTag.name} (${prevTag.commit.sha}).`);
+            } catch (e) {
+              // GitHub can refuse to create a branch from an older commit (403). The release
+              // itself already succeeded, so warn with the manual command instead of failing.
+              if (e.status !== 403) throw e;
+              core.warning(
+                `Could not create ${branchName} from ${prevTag.name}: ${e.message}. ` +
+                  `Create it by hand: git push origin ${prevTag.commit.sha}:refs/heads/${branchName}`,
+              );
+            }

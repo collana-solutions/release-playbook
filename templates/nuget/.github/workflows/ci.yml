@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+      - "release/**"
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions: {}
+
+# A newer push to the same PR replaces the run that has not finished.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  changeset-check:
+    name: Changeset Check
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      # Activates the pnpm version pinned in package.json's "packageManager".
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # The Version Packages PR consumes the changesets it releases, so the check cannot pass on it. A branch name
+      # alone is no proof (anyone can push a changeset-release/* branch), so the PR must also come from the bot.
+      - name: Check for changesets
+        if: ${{ !(startsWith(github.head_ref, 'changeset-release/') && github.event.pull_request.user.login == 'csag-changesets-bot[bot]') }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: pnpm exec changeset status --since="origin/$BASE_REF"
+
+  # The branch ruleset requires this check by its name, "Build, Test & Pack".
+  build:
+    name: Build, Test & Pack
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      checks: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # global.json pins the SDK. Add `dotnet-version` (for example 8.x) when a test project
+      # targets a runtime that SDK does not bring.
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore --locked-mode
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      # GitHubActionsTestLogger writes failure annotations and the job summary from
+      # inside the run (no token needed). The TRX files feed the PR comment below.
+      # CUSTOMIZE: the GitHubActions logger needs the GitHubActionsTestLogger package in
+      # every test project. Drop `--logger GitHubActions` if the projects do not reference it.
+      - name: Test
+        run: dotnet test --configuration Release --no-build --logger GitHubActions --logger trx --results-directory ./test-results
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-results
+          path: ./test-results
+          retention-days: 7
+
+      # Sticky PR comment with per-suite totals, updated in place on every push.
+      - name: Publish test results
+        if: always()
+        uses: EnricoMi/publish-unit-test-result-action@7622c5bf3d112a72ab4fa3951c2aa5723d8ab92d # v2.25.0
+        with:
+          files: ./test-results/**/*.trx
+
+      - name: Pack (smoke test)
+        run: dotnet pack --configuration Release --no-build -o ./nupkgs
+
+      - name: Upload packages
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nupkgs
+          path: ./nupkgs
+          retention-days: 7
+
+  # Audits the workflows for template injection, unpinned actions, broad permissions and similar
+  # problems. With advanced-security off, a finding fails this job instead of only landing in code
+  # scanning. Exceptions live in .github/zizmor.yml, each with its reason.
+  zizmor:
+    name: zizmor
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1
+        with:
+          advanced-security: false

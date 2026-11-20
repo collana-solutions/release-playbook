@@ -1,0 +1,15 @@
+# Every packed .NET project directory holds a private package.json, so changesets can
+# track its version.
+# CUSTOMIZE: the directories of the packed projects.
+packages:
+  - "packages/*"
+
+# Reject package versions published less than 14 days ago (14 * 24 * 60 = 20160 minutes).
+# Mitigates supply-chain attacks by giving freshly published (potentially malicious) versions
+# time to be detected and pulled before they can be installed.
+minimumReleaseAge: 20160
+
+# Fail the install rather than silently recording an exception. Without this, pnpm appends
+# offending versions to minimumReleaseAgeExclude by itself, which would let the scheduled
+# Refresh lockfiles job quietly bypass the policy it is supposed to respect.
+minimumReleaseAgeStrict: true

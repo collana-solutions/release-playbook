@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+      - 'release/**'
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  changeset-check:
+    name: Changeset Check
+    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      # Activates the pnpm version pinned in the root manifest packageManager field.
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # The Version Packages PR consumes the changesets it releases, so the check cannot pass on it. A branch name
+      # alone is no proof (anyone can push a changeset-release/* branch), so the PR must also come from the bot.
+      - name: Check for changesets
+        if: ${{ !(startsWith(github.head_ref, 'changeset-release/') && github.event.pull_request.user.login == 'csag-changesets-bot[bot]') }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: pnpm exec changeset status --since="origin/$BASE_REF"
+
+  # CUSTOMIZE: the steps after Install Dependencies are placeholders. Replace them with
+  # the checks of this repository, and keep the job name: the branch ruleset requires
+  # the "Verify" check.
+  verify:
+    name: Verify
+    if: github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Placeholder. Build first when type-aware lint or tsc resolves workspace
+      # dependencies through their built output.
+      - name: Build
+        run: pnpm run build
+
+      # Placeholder.
+      - name: Lint
+        run: pnpm run lint
+
+      # Placeholder.
+      - name: Test
+        run: pnpm run test
+
+  # Static analysis of the workflows themselves (template injection, unpinned actions,
+  # excessive permissions). Findings fail the job.
+  zizmor:
+    name: zizmor
+    if: github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1
+        with:
+          advanced-security: false

@@ -1,0 +1,58 @@
+name: NuGet Dependency Submission
+
+# Submits the resolved NuGet dependency graph, transitive packages included, to GitHub's
+# dependency graph, so Dependabot alerts also cover packages that the static scan of the
+# project files does not resolve. Needs RestorePackagesWithLockFile for the locked restore.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Generate snapshot without submitting to GitHub"
+        type: boolean
+        default: true
+
+permissions: {}
+
+jobs:
+  dependency-submission:
+    runs-on: ubuntu-latest
+    # The dependency snapshot API requires contents: write.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Restore dependencies
+        run: dotnet restore --locked-mode
+
+      - name: Build dependency snapshot
+        run: |
+          dotnet list package --include-transitive --format json > deps.json
+          node scripts/build-dependency-snapshot.mjs deps.json snapshot.json
+
+      - name: Submit snapshot
+        if: inputs.dry-run != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          gh api \
+            --method POST \
+            "repos/$REPOSITORY/dependency-graph/snapshots" \
+            --input snapshot.json
+
+      - name: Upload snapshot artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: dependency-snapshot
+          path: snapshot.json

@@ -1,0 +1,6 @@
+rules:
+  use-trusted-publishing:
+    ignore:
+      # feedz.io offers no trusted publishing, so the preview push authenticates with FEEDZ_TOKEN.
+      # Releases to nuget.org use trusted publishing (nuget-publish.yml).
+      - nuget-preview.yml

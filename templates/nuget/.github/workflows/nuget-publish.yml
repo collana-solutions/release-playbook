@@ -1,0 +1,109 @@
+name: NuGet Publish
+
+# Pushes the packages to nuget.org through trusted publishing, so no API key is stored.
+# The nuget.org policy trusts this repository, this workflow file and the `production`
+# environment (see "Adapting for NuGet Packages" in the release playbook).
+#
+# CUSTOMIZE: every spot marked below names the anchor package. One package of the fixed
+# group is the anchor: its GitHub Release runs this workflow, which packs and pushes
+# all packages. With a single package, that package is the anchor.
+on:
+  release:
+    types: [published]
+  # Publishes an existing release again, for example after a failed push. A re-run of a release run uses the
+  # workflow as it was at the release tag. A dispatch from main uses this file and checks out the tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        # CUSTOMIZE: the anchor package's release tag.
+        description: Release tag of the anchor package, for example @collana-solutions/YOUR-ANCHOR-PACKAGE@1.2.3
+        required: true
+        type: string
+
+permissions: {}
+
+# Runs are serialized and pushes use --skip-duplicate, so a second run for the same version pushes nothing.
+concurrency:
+  group: nuget-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to nuget.org
+    # A fixed group produces one GitHub Release per package for the same version. Only the anchor
+    # package's release runs this job, and it packs and pushes every package.
+    # CUSTOMIZE: the anchor package's changeset name.
+    if: startsWith(inputs.tag || github.event.release.tag_name, '@collana-solutions/YOUR-ANCHOR-PACKAGE@')
+    runs-on: ubuntu-latest
+    # nuget.org's trusted publishing policy for these packages names this environment, and the OIDC token
+    # carries it, so only this job can obtain a push key.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+          persist-credentials: false
+
+      # global.json pins the SDK. Add `dotnet-version` (for example 8.x) when a test project
+      # targets a runtime that SDK does not bring.
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Extract version from tag
+        id: version
+        env:
+          TAG: ${{ inputs.tag || github.event.release.tag_name }}
+        run: |
+          # Tag format: @collana-solutions/YOUR-ANCHOR-PACKAGE@1.2.3
+          echo "version=${TAG##*@}" >> "$GITHUB_OUTPUT"
+
+      # The package.json files exist for changesets only and must not end up in a package.
+      - name: Remove changesets version-tracking stubs
+        run: find . -name package.json -not -path "*/node_modules/*" -delete
+
+      - name: Restore
+        run: dotnet restore --locked-mode
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test --configuration Release --no-build
+
+      # Packs every project that does not set <IsPackable>false</IsPackable>. Test projects set it through the test SDK.
+      - name: Pack
+        run: dotnet pack --configuration Release --no-build -o ./nupkgs
+
+      # The version comes from the .csproj files, which scripts/sync-versions.mjs sets in the version PR, so
+      # this fails when the tag and the projects disagree.
+      # CUSTOMIZE: the anchor package's NuGet ID.
+      - name: Verify packed version matches the release tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ls ./nupkgs
+          test -f "./nupkgs/YOUR.ANCHOR.PACKAGE.ID.${VERSION}.nupkg"
+
+      # The key nuget.org returns is valid for one hour, so it is requested only once the packages are built.
+      # NUGET_USER is the nuget.org profile name of the member of collana-solutions who owns the policy.
+      - name: Log in to nuget.org
+        id: nuget-login
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+        with:
+          user: ${{ vars.NUGET_USER }}
+
+      # Each .snupkg next to its .nupkg goes to the nuget.org symbol server with the same key.
+      - name: Push to nuget.org
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+        run: |
+          dotnet nuget push "./nupkgs/*.nupkg" \
+            --api-key "$NUGET_API_KEY" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate

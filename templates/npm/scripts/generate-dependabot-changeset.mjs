@@ -1,4 +1,4 @@
-﻿import fs from "node:fs";
+import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
@@ -17,7 +17,7 @@ function getFixedPackages() {
   const configPath = path.join(repoRoot, ".changeset", "config.json");
   const raw = fs.readFileSync(configPath, "utf8").replace(/^\uFEFF/, "");
   const config = JSON.parse(raw);
-  // fixed is an array of arrays; flatten all groups
+  // fixed is an array of arrays, so flatten all groups
   return (config.fixed || []).flat();
 }
 
@@ -126,12 +126,12 @@ const fixedPackages = getFixedPackages();
 
 // This script assumes packages are managed as a single "fixed" group (see
 // .changeset/config.json). If a dependency update touched a workspace package but
-// no fixed group is configured, we'd emit an empty changeset — CI would pass but
+// no fixed group is configured, we'd emit an empty changeset: CI would pass but
 // nothing would ever be released. Fail loudly instead so the omission is obvious.
 if (workspacePackagesChanged && fixedPackages.length === 0) {
   console.error(
     "A workspace package changed but no 'fixed' group is configured in .changeset/config.json.\n" +
-      "This script bumps the fixed group; without one it cannot know which packages to bump.\n" +
+      "This script bumps the fixed group. Without one it cannot know which packages to bump.\n" +
       "Add a 'fixed' group, or adapt this script to bump the specific changed packages.",
   );
   process.exit(1);

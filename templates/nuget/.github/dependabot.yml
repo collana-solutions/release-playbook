@@ -1,0 +1,64 @@
+# The Dependabot Changeset workflow auto-generates a changeset for every PR opened here,
+# so these updates flow through the normal release process.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Wait a month before updating, to minimize the risk of supply chain attacks.
+    cooldown:
+      default-days: 30
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+      # Groups default to `applies-to: version-updates`, so security PRs need their own entry.
+      # Cooldown does not apply to security updates, they land immediately.
+      github-actions-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  - package-ecosystem: "nuget"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Wait 14 days before updating, to minimize the risk of supply chain attacks.
+    cooldown:
+      default-days: 14
+    ignore:
+      # Major versions of the framework packages follow the .NET version the library targets.
+      # CUSTOMIZE: add packages whose major version is held back on purpose, with the reason.
+      - dependency-name: "Microsoft.Extensions*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "Microsoft.EntityFrameworkCore*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "Microsoft.AspNetCore*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      nuget-ecosystem:
+        patterns:
+          - "*"
+      nuget-ecosystem-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  # pnpm dependencies: the changesets release tooling at the repo root.
+  # Dependabot handles pnpm workspaces under the "npm" ecosystem.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # 14 days, matching the minimumReleaseAge floor in pnpm-workspace.yaml.
+    cooldown:
+      default-days: 14
+    groups:
+      npm-ecosystem:
+        patterns:
+          - "*"
+      npm-ecosystem-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
