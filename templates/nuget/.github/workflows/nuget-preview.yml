@@ -56,21 +56,25 @@ jobs:
           # A feature PR carries the current release in package.json, so its preview goes
           # one patch above it. The changesets release PR already carries the upcoming
           # version, so its preview is a release candidate just below that release.
+          # In prerelease mode package.json holds a prerelease such as 2.0.0-rc.0, and the
+          # preview extends it to 2.0.0-rc.0.pr.42.183, which sorts after that prerelease
+          # and before the next one (2.0.0-rc.1).
           # Either way the preview sorts after the current release, and a consumer that
           # moves only some packages of a fixed group to it gets a NU1605 downgrade error
           # instead of a silent mix. The run number makes every push a new version,
           # because NuGet caches packages by id and version and never downloads the same
           # version twice.
           BASE=$(node -p "require('./packages/YOUR-ANCHOR-PROJECT/package.json').version")
-          IFS=. read -r MAJOR MINOR PATCH <<< "${BASE%%-*}"
-          if [[ "$HEAD_REF" != changeset-release/* ]]; then
-            PATCH=$((PATCH + 1))
+          if [[ "$BASE" == *-* ]]; then
+            VERSION="${BASE}.pr.${PR_NUMBER}.${GITHUB_RUN_NUMBER}"
+          else
+            IFS=. read -r MAJOR MINOR PATCH <<< "$BASE"
+            if [[ "$HEAD_REF" != changeset-release/* ]]; then
+              PATCH=$((PATCH + 1))
+            fi
+            VERSION="${MAJOR}.${MINOR}.${PATCH}-pr.${PR_NUMBER}.${GITHUB_RUN_NUMBER}"
           fi
-          echo "version=${MAJOR}.${MINOR}.${PATCH}-pr.${PR_NUMBER}.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
-
-      # The package.json files exist for changesets only and must not end up in a package.
-      - name: Remove changesets version-tracking stubs
-        run: find . -name package.json -not -path "*/node_modules/*" -delete
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Restore
         run: dotnet restore --locked-mode

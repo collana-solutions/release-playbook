@@ -22,19 +22,23 @@ on:
 
 permissions: {}
 
-# Runs are serialized and pushes use --skip-duplicate, so a second run for the same version pushes nothing.
-concurrency:
-  group: nuget-publish
-  cancel-in-progress: false
-
 jobs:
   publish:
     name: Publish to nuget.org
     # A fixed group produces one GitHub Release per package for the same version. Only the anchor
-    # package's release runs this job, and it packs and pushes every package.
+    # package's release runs this job, and it packs and pushes every package. A package outside the
+    # anchor's group would never be published, so .changeset/config.json has exactly one fixed group,
+    # which holds every packed project (or the single package), and the anchor is one of them.
     # CUSTOMIZE: the anchor package's changeset name.
     if: startsWith(inputs.tag || github.event.release.tag_name, '@collana-solutions/YOUR-ANCHOR-PACKAGE@')
     runs-on: ubuntu-latest
+    # The group is on the job, so a skipped release of another package never enters it, and every
+    # release tag has its own group, so no release can replace the pending run of another version.
+    # Runs for the same tag wait for each other, and pushes use --skip-duplicate, so a second run for
+    # the same version pushes nothing.
+    concurrency:
+      group: nuget-publish-${{ inputs.tag || github.event.release.tag_name }}
+      cancel-in-progress: false
     # nuget.org's trusted publishing policy for these packages names this environment, and the OIDC token
     # carries it, so only this job can obtain a push key.
     environment: production
@@ -63,10 +67,6 @@ jobs:
           # Tag format: @collana-solutions/YOUR-ANCHOR-PACKAGE@1.2.3
           echo "version=${TAG##*@}" >> "$GITHUB_OUTPUT"
 
-      # The package.json files exist for changesets only and must not end up in a package.
-      - name: Remove changesets version-tracking stubs
-        run: find . -name package.json -not -path "*/node_modules/*" -delete
-
       - name: Restore
         run: dotnet restore --locked-mode
 
@@ -81,14 +81,39 @@ jobs:
         run: dotnet pack --configuration Release --no-build -o ./nupkgs
 
       # The version comes from the .csproj files, which scripts/sync-versions.mjs sets in the version PR, so
-      # this fails when the tag and the projects disagree.
-      # CUSTOMIZE: the anchor package's NuGet ID.
-      - name: Verify packed version matches the release tag
+      # this fails when the tag and the projects disagree. Every package has to carry the release version,
+      # because --skip-duplicate would skip a package that kept an older one and leave the new version
+      # unpublished. The package.json files exist for changesets only, so no package may contain one.
+      # CUSTOMIZE: ANCHOR, the anchor package's NuGet ID.
+      - name: Verify packages
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          ANCHOR: YOUR.ANCHOR.PACKAGE.ID
         run: |
-          ls ./nupkgs
-          test -f "./nupkgs/YOUR.ANCHOR.PACKAGE.ID.${VERSION}.nupkg"
+          shopt -s nullglob
+          packages=(./nupkgs/*.nupkg)
+          if [ "${#packages[@]}" -eq 0 ]; then
+            echo "::error::dotnet pack produced no .nupkg in ./nupkgs"
+            exit 1
+          fi
+          failed=0
+          for package in "${packages[@]}"; do
+            name=$(basename "$package")
+            echo "$name"
+            if [[ "$name" != *".${VERSION}.nupkg" ]]; then
+              echo "::error::$name does not carry the release version ${VERSION}"
+              failed=1
+            fi
+            if unzip -l "$package" | grep -qE '[ /]package\.json$'; then
+              echo "::error::$name contains a package.json"
+              failed=1
+            fi
+          done
+          if [ ! -f "./nupkgs/${ANCHOR}.${VERSION}.nupkg" ]; then
+            echo "::error::The anchor package ${ANCHOR}.${VERSION}.nupkg is missing"
+            failed=1
+          fi
+          exit "$failed"
 
       # The key nuget.org returns is valid for one hour, so it is requested only once the packages are built.
       # NUGET_USER is the nuget.org profile name of the member of collana-solutions who owns the policy.

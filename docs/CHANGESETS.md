@@ -109,7 +109,7 @@ The examples below use two illustrative packages, `@collana-solutions/pkg-a` and
 | `@collana-solutions/pkg-a` | `packages/pkg-a` |
 | `@collana-solutions/pkg-b` | `packages/pkg-b` |
 
-A **fixed** group means the packages always share the same version number: when one is bumped, the others are bumped to the same version too, even if they have no changes. A repo can have a single package, one fixed group, or several — adjust the `fixed` array in `.changeset/config.json`.
+A **fixed** group means the packages always share the same version number: when one is bumped, the others are bumped to the same version too, even if they have no changes. A repo can have a single package, one fixed group, or several. Set them in the `fixed` array in `.changeset/config.json`. A NuGet repo has exactly one fixed group, which holds every packed project (or the single package), see [NuGet publish workflow](#nuget-publish-workflow).
 
 GitHub Releases are created automatically on publish.
 
@@ -181,6 +181,8 @@ pnpm changeset --empty
 ```
 
 This creates a changeset file that tells CI "I intentionally have no release." It will not trigger any version bumps or changelog entries.
+
+If only empty changesets are pending when the Release workflow runs, for example a Dependabot changeset that landed after the Version Packages PR was last updated, `changesets/action` would do nothing and leave versions that are already bumped unreleased. The Release workflow therefore sets aside the pending changesets for its run when all of them are empty. The files stay in the repository until the next Version Packages PR consumes them.
 
 ### Multiple Changesets per PR
 
@@ -326,6 +328,8 @@ NuGet has no counterpart to pkg.pr.new, so every NuGet repo has its own public p
 | The Version Packages PR (`changeset-release/*`) | release candidate of the upcoming version | `1.5.0-pr.73.190`              |
 
 `42` and `73` are PR numbers, `183` and `190` workflow run numbers. The run number gives every push a new version, because NuGet caches a package by ID and version and never downloads the same version twice. Every preview sorts above the current release, and all packages of the repo get the same preview version. A consumer that moves only some packages of a fixed group to a preview therefore gets a `NU1605` downgrade error instead of a silent mix.
+
+In [prerelease mode](#prereleases--release-candidates) `package.json` holds a prerelease such as `2.0.0-rc.0`, and the preview appends the PR and run numbers to it: `2.0.0-rc.0.pr.42.183`. That sorts after `2.0.0-rc.0` and before the next prerelease, `2.0.0-rc.1`. The Version Packages PR already carries the upcoming prerelease, so its preview sorts right after that one.
 
 **Using a preview.** Add the feed to the application's `nuget.config`, with package source mapping:
 
@@ -647,9 +651,9 @@ release/v1.x:     └──── v1.5.3 ──── v1.5.4 ──── v1.6.0
 
 All releases from `release/v1.x` go through the same automated flow: PR → CI check → merge → Version Packages PR → merge → publish.
 
-> **Dist-tags (npm):** Backport releases are published with a version-specific dist-tag (e.g., `release-v1`) instead of `latest`. NuGet has no dist-tags, so a backport is simply a lower version on nuget.org. This means `npm install @collana-solutions/pkg-a` always returns the highest stable version from `main`, while `npm install @collana-solutions/pkg-a@release-v1` returns the latest v1 release.
+> **Dist-tags (npm):** Backport releases are published with a dist-tag named after the release branch instead of `latest`: `release/v1.x` publishes to `release-v1`, and a minor branch such as `release/v1.2.x` to `release-v1.2`, so a hotfix there never moves `release-v1` back to an older version. NuGet has no dist-tags, so a backport is simply a lower version on nuget.org. This means `npm install @collana-solutions/pkg-a` always returns the highest stable version from `main`, while `npm install @collana-solutions/pkg-a@release-v1` returns the latest v1 release.
 
-> **Don't combine a release branch with prerelease mode.** `changeset publish --tag <name>` is rejected outright while `pre.json` is in `pre` mode ("Releasing under custom tag is not allowed in pre mode!", exit 1). Since the npm `backport` job adds `--tag release-vN` on every `release/**` branch, a prerelease there will fail the publish step. Exit prerelease mode before the Version Packages PR is merged, or drop the `--tag` for that branch. Prereleases on `main` are unaffected: no `--tag` is passed there, and changesets publishes under the prerelease tag by itself. The NuGet Release workflow passes no `--tag` at all, so this does not apply to NuGet repos.
+> **Don't combine a release branch with prerelease mode.** `changeset publish --tag <name>` is rejected outright while `pre.json` is in `pre` mode ("Releasing under custom tag is not allowed in pre mode!", exit 1). Since the npm `backport` job adds `--tag release-vN` (or `release-vN.M`) on every `release/**` branch, a prerelease there will fail the publish step. Exit prerelease mode before the Version Packages PR is merged, or drop the `--tag` for that branch. Prereleases on `main` are unaffected: no `--tag` is passed there, and changesets publishes under the prerelease tag by itself. The NuGet Release workflow passes no `--tag` at all, so this does not apply to NuGet repos.
 
 > **Changelogs:** Each branch maintains its own `CHANGELOG.md`. The changelog on `release/v1.x` only contains v1 entries, while `main` only contains entries from `main`. The **GitHub Release page** is the canonical cross-branch reference for all release notes.
 
@@ -694,8 +698,7 @@ Then create the GitHub Releases by hand, for example with `gh release create <ta
 # 1. The release tag of the anchor package
 git checkout "@collana-solutions/<anchor-package>@1.2.3"
 
-# 2. Remove the changesets stubs and pack. CI builds are deterministic only with ContinuousIntegrationBuild.
-find . -name package.json -not -path "*/node_modules/*" -delete
+# 2. Pack. CI builds are deterministic only with ContinuousIntegrationBuild.
 dotnet pack --configuration Release -p:ContinuousIntegrationBuild=true -o ./nupkgs
 
 # 3. Push with a short-lived API key
@@ -858,17 +861,17 @@ push to main
       publish         id-token: write, env production      no build, install with --ignore-scripts
         release-branch    App token                        major bumps only
 push to release/**
-  backport            id-token: write, env production      one job, publishes to release-vN
+  backport            id-token: write, env production      one job, publishes to release-vN[.M]
 ```
 
-- **`select-mode`** decides what the run does: `version` while changesets are pending, `publish` when a `package.json` version is not on npm yet, `none` otherwise.
+- **`select-mode`** decides what the run does: `version` while changesets are pending, `publish` when a `package.json` version is not on npm yet, `none` otherwise. Before that, it sets aside the pending changesets when all of them are empty (see [Empty Changesets](#empty-changesets-non-releasable-changes)).
 - **`version`** opens or updates the Version Packages PR with the App token, so CI runs on it.
 - **`pack`** installs with the install scripts that `allowBuilds` in `pnpm-workspace.yaml` permits, builds, and uploads the tarballs of the publish plan as an artifact. It has no publish credentials.
 - **`publish`** is the only job with `id-token: write`, and it runs in the environment `production`. It installs with `pnpm install --frozen-lockfile --ignore-scripts`, because the publish sub-action runs the changesets CLI from `node_modules`, builds nothing, and publishes the packed tarballs. Code from the dependency tree therefore never runs next to the publish credential. It creates the git tags and GitHub Releases with the App token, so the [tag ruleset](#per-repo-setup-checklist) can allow the App alone.
 - **`release-branch`** creates `release/vN.x` after a major release (see [Backporting](#backporting--hotfixes-on-older-versions)).
 - **Every release job** sets `package-manager-cache: false` on `actions/setup-node`, so no job restores a dependency cache that a pull request run could have written.
 
-**Backports run as a single `backport` job.** Changesets refuses a custom dist-tag in artifact mode ("Releasing under custom tag is not allowed in artifact mode"), and `publish-plan` has no tag option. A push to `release/**` therefore runs one job that versions, builds and publishes with `changeset publish --tag release-vN`, also through trusted publishing in the environment `production`. Building next to the publish credential is accepted there because backports are rare.
+**Backports run as a single `backport` job.** Changesets refuses a custom dist-tag in artifact mode ("Releasing under custom tag is not allowed in artifact mode"), and `publish-plan` has no tag option. A push to `release/**` therefore runs one job that versions, builds and publishes with `changeset publish --tag release-vN` (`release-vN.M` on a minor branch such as `release/v1.2.x`), also through trusted publishing in the environment `production`. Building next to the publish credential is accepted there because backports are rare.
 
 ### Registry configuration
 
@@ -983,7 +986,7 @@ Both sub-options matter, and each fails differently:
 `changeset version` only bumps the `package.json` files. [`scripts/sync-versions.mjs`](../templates/nuget/scripts/sync-versions.mjs) wraps it, and the Release workflow runs it as its `version-script`. The script:
 
 1. runs `pnpm exec changeset version`,
-2. writes each workspace package's new version into the `<Version>` of the `.csproj` in the same directory (or adds a `<Version>` to its first `PropertyGroup`),
+2. writes each workspace package's new version into the `.csproj` in the same directory. It sets every `<Version>` property of an unconditioned top-level `PropertyGroup`, or adds one to the first such `PropertyGroup` (or to a new one at the start of the project). A `<Version>` anywhere else, for example inside a `PackageReference`, stays as it is. The script stops with an error when a packed project sets `PackageVersion`, `VersionPrefix` or `VersionSuffix` in a `PropertyGroup` (the package version has to come from `<Version>` alone), or when the `.csproj` does not carry the new version afterwards,
 3. runs `dotnet restore --force-evaluate`. A `packages.lock.json` records the version of every project its project references, and neither a locked nor a plain restore notices when that version is out of date. Without references between the packed projects nothing changes in this step.
 
 The Version Packages PR therefore carries the `package.json`, `.csproj`, CHANGELOG and lock file changes together. The restore runs at the repository root, so it needs exactly one solution or project file there.
@@ -994,14 +997,14 @@ The Version Packages PR therefore carries the `package.json`, `.csproj`, CHANGEL
 
 [`nuget-publish.yml`](../templates/nuget/.github/workflows/nuget-publish.yml) runs on `release: published`:
 
-- **Only the anchor package's tag publishes.** A fixed group produces one GitHub Release per package for the same version, and each one starts the workflow. The job runs only when the tag starts with the anchor package's name (`@collana-solutions/<anchor>@`), and it then packs and pushes every package of the repo. Any package of the fixed group can be the anchor, for example the one the others depend on. With a single package, that package is the anchor.
+- **Only the anchor package's tag publishes.** A fixed group produces one GitHub Release per package for the same version, and each one starts the workflow. The job runs only when the tag starts with the anchor package's name (`@collana-solutions/<anchor>@`), and it then packs and pushes every package of the repo. Any package of the fixed group can be the anchor, for example the one the others depend on. With a single package, that package is the anchor. This needs exactly one fixed group in `.changeset/config.json` that holds every packed project (or the single package), with the anchor in it. A package outside that group gets a GitHub Release of its own that publishes nothing, so it would never reach nuget.org.
 - **Environment `production`.** The job requests the OIDC token (`id-token: write`) in the environment `production`, which the nuget.org policy names. The environment's [deployment rules](#per-repo-setup-checklist) limit it to release tags and `main`.
-- **Checks before the push.** It restores in locked mode, builds, tests and packs, then verifies that the anchor package's `.nupkg` carries the version from the tag. The version comes from the `.csproj` files, so this fails when the tag and the projects disagree.
+- **Checks before the push.** It restores in locked mode, builds, tests and packs. The **Verify packages** step then checks that every `.nupkg` carries the version from the tag, that the anchor package's `.nupkg` exists, and that no `.nupkg` contains a `package.json`. The version comes from the `.csproj` files, so this fails when the tag and the projects disagree. A package that kept an older version would otherwise be skipped by `--skip-duplicate` without an error.
 - **Login last.** `NuGet/login` exchanges the OIDC token for an API key that is valid for one hour, so it runs only once the packages are built. Its `user` input is the org variable `NUGET_USER`.
 - **Symbols too.** `dotnet nuget push "./nupkgs/*.nupkg"` also pushes the `.snupkg` next to each `.nupkg` to the nuget.org symbol server, with the same key.
-- **Safe to repeat.** Runs are serialized and pushes use `--skip-duplicate`. To publish an existing release again, for example after a failed push, run **NuGet Publish** from the Actions tab with the anchor package's release tag.
+- **Safe to repeat.** The concurrency group is on the job and named after the release tag, so runs for the same release wait for each other, and a release of another package or version never replaces a pending run. Pushes use `--skip-duplicate`. To publish an existing release again, for example after a failed push, run **NuGet Publish** from the Actions tab with the anchor package's release tag.
 
-> **Key detail:** The workflow deletes every `package.json` before packing, so none ends up inside a `.nupkg`. Leave the generated `CHANGELOG.md` files alone: `changesets/action` reads the entry for the released version out of the `CHANGELOG.md` beside each tagged `package.json` to build the GitHub Release body, and errors if the file exists without a matching entry.
+> **Key detail:** `dotnet pack` leaves the `package.json` files out of the packages, and the **Verify packages** step fails if a `.nupkg` contains one. The workflow deletes no file, so a frontend or sample project with its own `package.json` still builds. Leave the generated `CHANGELOG.md` files alone: `changesets/action` reads the entry for the released version out of the `CHANGELOG.md` beside each tagged `package.json` to build the GitHub Release body, and errors if the file exists without a matching entry.
 
 ### Trusted publishing on nuget.org
 
@@ -1102,10 +1105,10 @@ Both templates follow these rules, and so should every workflow an adopting repo
 - **Pin every action to a full commit SHA, with the exact version as a comment:** `uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`. Dependabot then updates the SHA and the comment together. Pick the newest release that is older than 30 days, the Dependabot cooldown for actions. Sub-actions such as `changesets/action/publish` use the same SHA as their parent action.
 - **`permissions: {}` at the top of every workflow,** and each job lists only what it needs. A job that does everything with an App token needs no `GITHUB_TOKEN` permission at all.
 - **No `${{ }}` inside scripts.** Values reach `run:` and `actions/github-script` through `env:` and are read as `"$NAME"` or `process.env.NAME`. An expression inside a script is substituted before the script runs, so a crafted branch name or PR title would become code.
-- **`persist-credentials: false` on every checkout.** A job that pushes passes its token explicitly (`git push "https://x-access-token:${APP_TOKEN}@github.com/${REPOSITORY}.git" ...`) instead of keeping it in the git config. The exception is a checkout for `changesets/action` with `push-with-git-cli: true`, which pushes with the stored credentials. It carries `# zizmor: ignore[artipacked]` with the reason, and its job uploads no artifact.
+- **`persist-credentials: false` on every checkout.** A job that pushes passes its token explicitly (`git push "https://x-access-token:${APP_TOKEN}@github.com/${REPOSITORY}.git" ...`) instead of keeping it in the git config. `changesets/action` needs no stored credentials either, also with `push-with-git-cli: true`: it authenticates its git pushes with its `github-token` input.
 - **A `zizmor` job in `ci.yml`,** named `zizmor` so the branch ruleset can require it, with `advanced-security: false` so a finding fails the check instead of only landing in code scanning. Every ignore is an inline `# zizmor: ignore[<audit>] <reason>` comment on the line it covers. A `zizmor.yml` config would exempt a whole file, so a later finding in that file would go unnoticed.
 - **No dependency cache in release jobs.** Every job that versions or publishes sets `package-manager-cache: false` on `actions/setup-node`, so it never restores a cache that a pull request run could have written (zizmor's `cache-poisoning` audit).
-- **No install scripts where nothing is built.** Jobs that only run the changesets CLI install with `pnpm install --frozen-lockfile --ignore-scripts`. Jobs that build allow only the install scripts listed under `allowBuilds` in `pnpm-workspace.yaml`.
+- **No install scripts where nothing is built.** Jobs that only run the changesets CLI install with `pnpm install --frozen-lockfile --ignore-scripts`. Jobs that build allow only the install scripts listed under `allowBuilds` in `pnpm-workspace.yaml`. **Refresh lockfiles** resolves with `pnpm install --lockfile-only`, which writes the lockfile without installing any package.
 - **Check Dependabot by PR author:** `github.event.pull_request.user.login == 'dependabot[bot]'`, never `github.actor`. The actor is whoever triggered the run, for example by pushing to a Dependabot branch.
 - **App tokens with explicit permissions.** Every `actions/create-github-app-token` step lists `permission-*` inputs, for example `permission-contents: write`, so the token gets only those instead of everything the App may do.
 - **Publishing jobs run in the environment `production`,** whose deployment rules limit which refs reach the registry credential.
@@ -1417,7 +1420,7 @@ The changesets config lives at `.changeset/config.json`:
 
 All files live in `.github/workflows/`. The Release workflow uses a **GitHub App token** (not `GITHUB_TOKEN`) so that PRs it creates trigger CI checks. It also:
 
-- **Publishes backports with a dist-tag** (e.g., `release-v1`) so the `latest` npm tag stays on the highest stable version from `main`
+- **Publishes backports with a dist-tag** (`release-v1`, or `release-v1.2` for a minor branch) so the `latest` npm tag stays on the highest stable version from `main`
 - **Auto-creates `release/vX.x` branches** when a new major version is published from `main`
 
 ### Branch Protection

@@ -19,8 +19,9 @@ jobs:
   refresh:
     name: Refresh pnpm lockfile
     runs-on: ubuntu-latest
-    # The PR is opened with the App token, so GITHUB_TOKEN needs no access.
-    permissions: {}
+    # The PR is opened with the App token, so GITHUB_TOKEN only reads for the checkout.
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -35,13 +36,15 @@ jobs:
       - name: Enable Corepack
         run: corepack enable
 
-      # Delete and reinstall so the lockfile is fully re-resolved to the newest
-      # versions the semver ranges allow. pnpm always picks the highest match, so a
-      # plain install would not move anything already recorded.
+      # Delete and re-resolve so the lockfile moves to the newest versions the semver
+      # ranges allow. pnpm always picks the highest match, so a plain install would not
+      # move anything already recorded. --lockfile-only writes the lockfile without
+      # installing any package or running any script, so no dependency code runs before
+      # the App token is created.
       - name: Refresh pnpm lockfile
         run: |
           rm -f pnpm-lock.yaml
-          pnpm install --no-frozen-lockfile
+          pnpm install --lockfile-only
 
       # GitHub does not start pull_request workflows for a push made with GITHUB_TOKEN.
       # With the App token, CI runs on the refresh PR.

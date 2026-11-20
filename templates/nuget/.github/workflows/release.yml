@@ -64,6 +64,25 @@ jobs:
         with:
           global-json-file: global.json
 
+      # changesets/action does nothing while only empty changesets are pending, even when
+      # package.json holds versions that are not released yet (src/index.ts in v2.1.2).
+      # When every pending changeset is empty, this checkout drops them so the action
+      # releases those versions. The files stay in the repository, and the next Version
+      # Packages PR consumes them.
+      - name: Set aside empty-only changesets
+        run: |
+          shopt -s nullglob
+          pending=()
+          for f in .changeset/*.md; do
+            [ "$(basename "$f")" = README.md ] || pending+=("$f")
+          done
+          [ "${#pending[@]}" -eq 0 ] && exit 0
+          releases=$(awk '{ sub(/\r$/, "") } FNR == 1 { fm = ($0 == "---"); next } fm && $0 == "---" { fm = 0 } fm && NF { n++ } END { print n + 0 }' "${pending[@]}")
+          if [ "$releases" -eq 0 ]; then
+            echo "Only empty changesets are pending, setting aside: ${pending[*]}"
+            rm -- "${pending[@]}"
+          fi
+
       # The private packages are only tagged (privatePackages.tag in .changeset/config.json).
       # No npm dist-tag is passed on release/** branches, because nothing goes to npm.
       - name: Create Release Pull Request or Publish
