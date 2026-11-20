@@ -111,7 +111,7 @@ jobs:
 
   # Audits the workflows for template injection, unpinned actions, broad permissions and similar
   # problems. With advanced-security off, a finding fails this job instead of only landing in code
-  # scanning. Exceptions live in .github/zizmor.yml, each with its reason.
+  # scanning. Exceptions are inline `# zizmor: ignore[<audit>] <reason>` comments.
   zizmor:
     name: zizmor
     if: ${{ !github.event.pull_request.draft }}

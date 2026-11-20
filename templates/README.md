@@ -24,18 +24,17 @@ npm/                                         nuget/
 ├── .changeset/config.json                   ├── .changeset/config.json
 ├── .github/                                 ├── .github/
 │   ├── dependabot.yml                       │   ├── dependabot.yml
-│   └── workflows/                           │   ├── zizmor.yml
-│       ├── ci.yml                           │   └── workflows/
-│       ├── dependabot-changeset.yml         │       ├── ci.yml
-│       ├── pkg.pr.new.yml                   │       ├── dependabot-changeset.yml
-│       ├── refresh-lockfiles.yml            │       ├── nuget-dependency-submission.yml
-│       └── release.yml                      │       ├── nuget-preview.yml
-├── .npmrc                                   │       ├── nuget-publish.yml
-├── package.json                             │       ├── refresh-lockfiles.yml
-├── pnpm-workspace.yaml                      │       └── release.yml
-└── scripts/                                 ├── package.json
-    └── generate-dependabot-changeset.mjs    ├── pnpm-workspace.yaml
-                                             └── scripts/
+│   └── workflows/                           │   └── workflows/
+│       ├── ci.yml                           │       ├── ci.yml
+│       ├── dependabot-changeset.yml         │       ├── dependabot-changeset.yml
+│       ├── pkg.pr.new.yml                   │       ├── nuget-dependency-submission.yml
+│       ├── refresh-lockfiles.yml            │       ├── nuget-preview.yml
+│       └── release.yml                      │       ├── nuget-publish.yml
+├── .npmrc                                   │       ├── refresh-lockfiles.yml
+├── package.json                             │       └── release.yml
+├── pnpm-workspace.yaml                      ├── package.json
+└── scripts/                                 ├── pnpm-workspace.yaml
+    └── generate-dependabot-changeset.mjs    └── scripts/
                                                  ├── build-dependency-snapshot.mjs
                                                  ├── generate-dependabot-changeset.mjs
                                                  └── sync-versions.mjs

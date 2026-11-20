@@ -86,7 +86,7 @@ jobs:
       - name: Push to feedz.io
         env:
           FEEDZ_TOKEN: ${{ secrets.FEEDZ_TOKEN }}
-        run: |
+        run: | # zizmor: ignore[use-trusted-publishing] feedz.io has no trusted publishing, so the preview push uses FEEDZ_TOKEN
           dotnet nuget push "./nupkgs/*.nupkg" \
             --api-key "$FEEDZ_TOKEN" \
             --source "$FEED_URL" \
