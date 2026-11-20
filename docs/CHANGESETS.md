@@ -1147,8 +1147,8 @@ The settings outside the repository files, in the order they are needed. Setting
 
 **After the first trusted publish:**
 
-- [ ] npm: every package set to "Require two-factor authentication and disallow tokens", and the npm token secrets deleted.
-- [ ] NuGet: the API key secrets the old workflows used deleted, and the keys revoked on nuget.org.
+- [ ] npm: every package set to "Require two-factor authentication and disallow tokens".
+- [ ] npm and NuGet: the token and API key secrets the old workflows used are org secrets that other repos share. Delete them, and revoke the keys on npmjs.com and nuget.org, only once no repository uses them any more.
 
 ---
 
