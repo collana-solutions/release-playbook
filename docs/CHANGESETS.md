@@ -1058,7 +1058,7 @@ The packages need a project URL, a README, an icon, symbols and Source Link. Put
 ```
 
 - The .NET 8 SDK and later include Source Link for GitHub, so no package reference is needed.
-- Use the collana-solutions package icon, for example `icon.png` from Csag.Blueprint.
+- The icon is the collana solutions logo, the avatar of the GitHub org. nuget.org shows it next to the package, and so do the package managers in Visual Studio and Rider. Fetch it with `curl -sL -o icon.png "https://avatars.githubusercontent.com/u/74188702?v=4"`.
 - A project that ships only as an analyzer or source generator has no library symbols to pack. Set `<IncludeSymbols>false</IncludeSymbols>` in that project, otherwise pack fails with NU5017.
 - `Description` and `PackageTags` belong in each project.
 - Test, sample and demo projects must not be packed. Test projects set `<IsPackable>false</IsPackable>` through the test SDK, other projects need it set explicitly.
