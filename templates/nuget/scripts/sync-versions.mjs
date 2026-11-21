@@ -47,7 +47,12 @@ for (const { path: projDir, version } of workspacePackages) {
 // Neither a locked nor a plain restore notices when that version is out of date, so
 // only a forced re-evaluation brings the lock files up to the new versions. Without
 // references between the packed projects nothing changes here.
-execSync("dotnet restore --force-evaluate", { stdio: "inherit" });
+//
+// changesets/action runs this script with its App token in GITHUB_TOKEN, which the
+// changelog generator needs. A restore can run MSBuild code from NuGet packages, so it
+// runs without the token.
+const { GITHUB_TOKEN, GH_TOKEN, ...restoreEnv } = process.env;
+execSync("dotnet restore --force-evaluate", { stdio: "inherit", env: restoreEnv });
 
 /**
  * Sets the project-level version of a .csproj and returns the new content.

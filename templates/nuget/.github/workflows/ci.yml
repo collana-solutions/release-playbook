@@ -48,6 +48,30 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: pnpm exec changeset status --since="origin/$BASE_REF"
 
+      # changeset status only counts changes inside the package directories. The shared
+      # build files outside them change every package too, so a PR that touches one needs
+      # a changeset file as well. An empty one (`pnpm changeset --empty`) is enough when
+      # nothing that ships changes.
+      # CUSTOMIZE: add other files outside the package directories that the packages build from.
+      - name: Check for changesets on shared build files
+        if: ${{ !(startsWith(github.head_ref, 'changeset-release/') && github.event.pull_request.user.login == 'csag-changesets-bot[bot]') }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          SHARED_FILES: '(^|/)(Directory\.Build\.props|Directory\.Packages\.props|global\.json)$'
+        run: |
+          shared=$(git diff --name-only "origin/$BASE_REF...HEAD" | grep -E "$SHARED_FILES" || true)
+          if [ -z "$shared" ]; then
+            echo "No shared build file changed"
+            exit 0
+          fi
+          changesets=$(git diff --name-only --diff-filter=AMR "origin/$BASE_REF...HEAD" -- .changeset | grep -E '^\.changeset/[^/]+\.md$' | grep -vx '.changeset/README.md' || true)
+          if [ -z "$changesets" ]; then
+            echo "::error::This PR changes shared build files but adds no changeset. Run pnpm changeset, or pnpm changeset --empty if no package changes. Changed: ${shared//$'\n'/, }"
+            exit 1
+          fi
+          echo "Shared build files changed, and the PR has a changeset:"
+          echo "$changesets"
+
   # The branch ruleset requires this check by its name, "Build, Test & Pack".
   build:
     name: Build, Test & Pack

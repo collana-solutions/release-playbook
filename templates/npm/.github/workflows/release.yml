@@ -255,11 +255,12 @@ jobs:
             const published = JSON.parse(process.env.PUBLISHED_PACKAGES);
             if (!published.length) return;
 
-            const newVersion = published[0].version;
-            const newMajor = parseInt(newVersion.split('.')[0], 10);
-
-            // Only act on stable major bumps (not prereleases)
-            if (newVersion.includes('-') || newMajor < 1) return;
+            // Only a stable N.0.0 release starts a new major. Prereleases, 0.x versions and
+            // every later release of the same major leave the release branches alone.
+            const newVersion = published[0].version.match(/^(\d+)\.(\d+)\.(\d+)$/);
+            if (!newVersion) return;
+            const [newMajor, newMinor, newPatch] = newVersion.slice(1).map(Number);
+            if (newMajor < 1 || newMinor !== 0 || newPatch !== 0) return;
 
             const prevMajor = newMajor - 1;
             const branchName = `release/v${prevMajor}.x`;
@@ -284,13 +285,15 @@ jobs:
                 per_page: 100,
             });
 
-            // Newest stable release of the previous major. Only tags of the packages just
-            // published (or bare vX.Y.Z tags) count, and versions are compared numerically
-            // because the tag list API does not return tags in version order.
+            // Newest stable release of the previous major. Only the tag forms changesets
+            // creates count: <package>@X.Y.Z for the packages just published, and vX.Y.Z in a
+            // single-package repo. An earlier release tool's vX.Y.Z tags match as well, which
+            // at worst ends in the 403 warning below. Versions are compared numerically because
+            // the tag list API does not return tags in version order.
             const publishedNames = new Set(published.map(p => p.name));
             const prevTag = tags
                 .map(t => {
-                    const match = t.name.match(/^(?:(.+)@|v)?(\d+)\.(\d+)\.(\d+)$/);
+                    const match = t.name.match(/^(?:(.+)@|v)(\d+)\.(\d+)\.(\d+)$/);
                     if (!match || (match[1] !== undefined && !publishedNames.has(match[1]))) return null;
                     return { tag: t, version: [match[2], match[3], match[4]].map(Number) };
                 })
