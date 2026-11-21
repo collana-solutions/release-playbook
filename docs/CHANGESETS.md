@@ -175,7 +175,7 @@ The CI check only requires a changeset when your PR **changes files inside a pac
 - Modifying documentation that isn't in a package
 - Refactoring root-level build scripts
 
-**NuGet repos have one exception:** `Directory.Build.props`, `Directory.Packages.props` and `global.json` change what every package builds from, wherever they sit in the repository. A PR that changes one of them needs a changeset file even when no package directory changed, so the Changeset Check runs a second step for them. Add an empty changeset when nothing that ships changes.
+**NuGet repos have one exception:** `Directory.Build.props`, `Directory.Packages.props` and `global.json` change what every package builds from, wherever they sit in the repository. A PR that changes one of them has to add a changeset file even when no package directory changed, so the Changeset Check runs a second step for them. Editing or renaming a changeset that is already on the base branch does not count. Add an empty changeset when nothing that ships changes.
 
 You only need an **empty changeset** when you changed a package but intentionally don't want a release (for example, a comment-only or test-only change *inside* a package):
 
@@ -1029,7 +1029,7 @@ Both sub-options matter, and each fails differently:
 
 1. runs `pnpm exec changeset version`,
 2. writes each workspace package's new version into the `.csproj` in the same directory. It sets every `<Version>` property of an unconditioned top-level `PropertyGroup`, or adds one to the first such `PropertyGroup` (or to a new one at the start of the project). A `<Version>` anywhere else, for example inside a `PackageReference`, stays as it is. The script stops with an error before writing when a packed project sets `PackageVersion`, `VersionPrefix` or `VersionSuffix` in a `PropertyGroup`, or a `<Version>` with a `Condition` on itself or on its `PropertyGroup` (the package version has to come from an unconditioned `<Version>` alone), and after writing when the `.csproj` does not carry the new version,
-3. runs `dotnet restore --force-evaluate`. A `packages.lock.json` records the version of every project its project references, and neither a locked nor a plain restore notices when that version is out of date. Without references between the packed projects nothing changes in this step. `changesets/action` runs the script with its App token in `GITHUB_TOKEN`, which the changelog generator needs. The restore runs without `GITHUB_TOKEN` and `GH_TOKEN` in its environment, because it can run MSBuild code from NuGet packages.
+3. runs `dotnet restore --force-evaluate`. A `packages.lock.json` records the version of every project its project references, and neither a locked nor a plain restore notices when that version is out of date. Without references between the packed projects nothing changes in this step. `changesets/action` runs the script with its App token in `GITHUB_TOKEN`, which the changelog generator needs. The script also inherits the action's own environment, which holds the same token as `INPUT_GITHUB-TOKEN` and the Actions runtime token. The restore runs without all of them (`GITHUB_TOKEN`, `GH_TOKEN`, every `INPUT_*` variable, `ACTIONS_RUNTIME_TOKEN` and `ACTIONS_ID_TOKEN_REQUEST_TOKEN`), because it can run MSBuild code from NuGet packages.
 
 The Version Packages PR therefore carries the `package.json`, `.csproj`, CHANGELOG and lock file changes together. The restore runs at the repository root, so it needs exactly one solution or project file there.
 
