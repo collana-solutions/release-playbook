@@ -43,6 +43,7 @@ This is the collana-solutions guide for working with changesets. It covers **eve
     - [Reverting a Release](#reverting-a-release)
     - [Skipping a Package From Release](#skipping-a-package-from-release)
     - [Force-Publishing Without Changes](#force-publishing-without-changes)
+    - [Moving a Package to a New Name](#moving-a-package-to-a-new-name)
     - [Dependabot Automation](#dependabot-automation)
       - [How it works](#how-it-works-1)
       - [What gets generated](#what-gets-generated)
@@ -174,6 +175,8 @@ The CI check only requires a changeset when your PR **changes files inside a pac
 - Modifying documentation that isn't in a package
 - Refactoring root-level build scripts
 
+**NuGet repos have one exception:** `Directory.Build.props`, `Directory.Packages.props` and `global.json` change what every package builds from, wherever they sit in the repository. A PR that changes one of them needs a changeset file even when no package directory changed, so the Changeset Check runs a second step for them. Add an empty changeset when nothing that ships changes.
+
 You only need an **empty changeset** when you changed a package but intentionally don't want a release (for example, a comment-only or test-only change *inside* a package):
 
 ```bash
@@ -195,7 +198,7 @@ Just run `pnpm changeset` multiple times. Each creates a separate file.
 
 ### What Happens If You Forget a Changeset
 
-If your PR **changed a package** but has no changeset, the **CI workflow fails**. The `Changeset Check` job runs `changeset status --since=origin/<base>`, which exits with code 1 only when a versionable package changed and no changeset exists. (A PR that changed no package passes without one.)
+If your PR **changed a package** but has no changeset, the **CI workflow fails**. The `Changeset Check` job runs `changeset status --since=origin/<base>`, which exits with code 1 only when a versionable package changed and no changeset exists. (A PR that changed no package passes without one.) In a NuGet repo, the step **Check for changesets on shared build files** also fails a PR that changes `Directory.Build.props`, `Directory.Packages.props` or `global.json` without adding a changeset file, see [Empty Changesets](#empty-changesets-non-releasable-changes).
 
 > **"Versionable"** excludes private (`"private": true`) packages. Changesets v3 neither versions nor tags them unless you opt in with `"privatePackages": { "version": true, "tag": true }` in `.changeset/config.json` — which repos that use changesets purely for versioning, such as [NuGet repos](#adapting-for-nuget-packages), have to do.
 
@@ -315,7 +318,7 @@ NuGet has no counterpart to pkg.pr.new, so every NuGet repo has its own public p
 
 - **One feed per repo** in the `collana-solutions` feedz.io organization, named after the repository in lowercase with dots as dashes (`Csag.Blueprint` → `csag-blueprint`, `Csag.WorkloadIdentity` → `csag-workloadidentity`). Its URL, `https://f.feedz.io/collana-solutions/<feed>/nuget/index.json`, goes into `FEED_URL` in `nuget-preview.yml`.
 - **Public read access**, so consumers restore without credentials.
-- **A retention rule that removes versions after 30 days.** The workflow never deletes anything itself.
+- **A retention rule that removes versions after 30 days** (0 versions, 30 days, see the [checklist](#per-repo-setup-checklist)). The workflow never deletes anything itself.
 - **The org secret `FEEDZ_TOKEN`** authenticates the push. feedz.io has no trusted publishing, which is why the push step carries an inline `# zizmor: ignore[use-trusted-publishing]` comment. Pull requests from forks and from Dependabot cannot read the secret, so they publish no preview.
 
 `nuget-preview.yml` runs on every pull request to `main` or `release/**` that is not a draft. It packs every package with a preview version, pushes the `.nupkg` and `.snupkg` files to the feed, and keeps one comment on the PR updated with the version of the latest push.
@@ -584,7 +587,7 @@ When `main` has moved on to a new major version (e.g., v2.x) but you need to rel
 The `.x` is just a naming convention meaning "this branch handles all releases for this major version." It is **not** a git pattern or wildcard — it's a plain branch name.
 
 **Key rules:**
-- The Release workflow **automatically creates** this branch when a new major version is published from `main` (e.g., publishing `2.0.0` creates `release/v1.x` from the highest stable `1.x.y` tag of the published packages)
+- The Release workflow **automatically creates** this branch when a new major version is published from `main` (e.g., publishing `2.0.0` creates `release/v1.x` from the highest stable `1.x.y` tag of the published packages). Only an `N.0.0` release does this. `2.0.1`, `2.1.0` and prereleases leave the release branches alone
 - You **reuse** it for all subsequent patches and minor releases for that major version
 - It accumulates releases linearly: v1.5.2 → v1.5.3 → v1.6.0 → v1.6.1 → ...
 - The CI and Release workflows are configured to run on `release/**` branches, so the process is fully automated — just like `main`
@@ -599,7 +602,9 @@ git checkout -b release/v1.x @collana-solutions/pkg-a@1.5.2
 git push -u origin release/v1.x
 ```
 
-> **Tags from before the scope rename:** the organization was called `neolution-ch` before, and older release tags read `@neolution-ch/<pkg>@<version>`. The Release workflow only looks at tags of the packages it just published, so the first major release after the rename finds no tag of the previous major and creates no release branch. Create it by hand from the last `@neolution-ch/...` tag of that major. The NuGet tag gate also skips these tags, which is fine because their versions are on nuget.org already.
+> **Tags from before the migration or a rename:** the Release workflow only counts the tag forms changesets creates for the packages it just published: `<package>@X.Y.Z`, and in a single-package npm repo `vX.Y.Z`. Tags of an earlier release tool (`1.2.3`, and `v1.2.3` in a NuGet repo) and tags of an old package name (`@neolution-ch/<pkg>@<version>`, from before the organization was renamed) never match. The first major release after a migration or rename therefore finds no tag of the previous major and creates no release branch. Create it by hand from the last old tag of that major if you need one. The NuGet tag gate also skips old tags, which is fine because their versions are on nuget.org already.
+>
+> A single-package npm repo whose earlier tool also tagged `vX.Y.Z` is the exception: there the step finds the old tag and tries to branch from it. That usually ends in the 403 warning above, once, on the first major after the migration. Ignore it unless you need a backport branch of the old code.
 
 > **Tip:** After pushing, configure **branch protection rules** for `release/**` in GitHub Settings (same rules as `main` — require status checks, require PR reviews). This ensures backports go through CI and code review.
 
@@ -764,6 +769,38 @@ pnpm changeset
 
 Since the packages are **fixed**, bumping either one will bump both.
 
+### Moving a Package to a New Name
+
+A package gets a new name when its repository adopts this setup under a new scope or ID, for example `@neolution-ch/x` → `@collana-solutions/x` or `Neolution.X` → `Csag.X`. Wherever the move touches no code, consumers should be able to switch by changing only the name.
+
+**Versions.** The new name continues the old numbering:
+
+| Case                                                                          | First version under the new name                                                      | Example                       |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- | ----------------------------- |
+| npm                                                                           | the last old version, published by hand, then a patch through the Release workflow    | `6.2.0` by hand, then `6.2.1` |
+| NuGet, nothing to change for consumers except the ID (analyzers, rule sets)   | the last old version, released by the template PR with an empty changeset            | `3.2.2`                       |
+| NuGet, namespaces renamed together with the ID                                | the next major, with a migration note that lists the `using` changes                  | `2.1.0` → `3.0.0`             |
+
+A major is only needed when code really breaks. Check whether consumers reference anything else that carries the old name, such as MSBuild properties, rule set paths or configuration sections. If they do, it is a major after all.
+
+**Older versions stay where they are.** Do not copy them to the new name. They stay installable under the old name, and vulnerability advisories are tracked by package name. Copying would also mean many manual publishes outside trusted publishing, and on NuGet the same assemblies under two IDs break every build where both meet.
+
+**Deprecate the old name, never unlist or unpublish it,** once the new name has its first release:
+
+- npm: `npm deprecate "@neolution-ch/x" "Moved to @collana-solutions/x"`
+- nuget.org: on the package's **Manage** page, deprecate every version as **Legacy** and name the new ID as the alternate package.
+
+**npm: the first publish is manual.** `npm trust` only accepts a package that exists, and a new trusted publisher configuration has to publish within 2 days. After the template PR is merged, in this order:
+
+1. Publish the current version by hand from `main`: `pnpm install --frozen-lockfile`, the build, then `pnpm publish --access public` (with `-r` in a workspace with several packages, and `--otp=<code>` if npm asks for one). pnpm replaces `workspace:` ranges, which `npm publish` would publish as they are.
+2. Register the trusted publisher with `npm trust`, see [Connecting the trusted publisher](#connecting-the-trusted-publisher).
+3. Merge the Version Packages PR within those 2 days. The template PR carries a patch changeset for it, so the patch goes out through trusted publishing, with provenance.
+4. Deprecate the old name.
+
+The template PR sets `repository.url` to exactly `https://github.com/collana-solutions/<repo>`, because npm checks it under trusted publishing. It adds no `provenance` field to `package.json`. pnpm adds provenance by itself under trusted publishing, and the field would make the manual publish in step 1 fail, since provenance needs an OIDC token from CI.
+
+**NuGet: the trust policy and the environment come first.** The [trusted publishing policy](#trusted-publishing-on-nugetorg) has to cover the new IDs before the first release. When the template PR carries only an empty changeset (the same version), **merging it publishes right away**: no changeset is pending, so the Release workflow tags the current version under the new name, and NuGet Publish pushes it. Set up the `production` environment, the policy and the preview feed before that merge. With a major, the release waits for the Version Packages PR as usual.
+
 ### Dependabot Automation
 
 Dependabot PRs don't include changeset files, so CI will initially fail. A dedicated workflow automatically generates a changeset for every Dependabot PR — no manual intervention needed.
@@ -897,7 +934,7 @@ done
 
 - **`--allow-publish` is required.** A new trusted publisher configuration allows only staged publishing unless it is set, and the workflow publishes directly.
 - **Publish within 2 days.** A new configuration has to publish within 2 days, so register it right before merging the Version Packages PR.
-- **The package has to exist.** `npm trust` only accepts packages that are already on npm. If npmjs.com offers no way to add a trusted publisher to an unpublished name, publish its first version by hand (see [Manual Publish Fallback](#manual-publish-fallback)) and register the trusted publisher afterwards.
+- **The package has to exist.** `npm trust` only accepts packages that are already on npm. If npmjs.com offers no way to add a trusted publisher to an unpublished name, publish its first version by hand and register the trusted publisher afterwards. For a package that moves to a new name, the order is in [Moving a Package to a New Name](#moving-a-package-to-a-new-name).
 
 **After the first trusted publish**, set every package to **Require two-factor authentication and disallow tokens** (package **Settings** on npmjs.com). Trusted publishing keeps working, and no token can publish any more. Then delete the npm token secrets the repo used, and remove the org secret once nothing else uses it.
 
@@ -931,8 +968,8 @@ Each packed .NET project needs a minimal `package.json` so changesets can track 
 ├── .changeset/
 │   └── config.json
 ├── packages/
-│   └── MyDotnetLib/
-│       ├── MyDotnetLib.csproj
+│   └── Csag.MyLib/
+│       ├── Csag.MyLib.csproj
 │       ├── package.json          ← minimal, for changesets only
 │       └── README.md             ← packed into the .nupkg
 ├── Directory.Build.props         ← shared package metadata
@@ -953,13 +990,17 @@ The per-project `package.json` is minimal:
 
 ```json
 {
-  "name": "@collana-solutions/my-dotnet-lib",
+  "name": "@collana-solutions/csag-mylib",
   "version": "1.0.0",
   "private": true
 }
 ```
 
 > **Note:** `"private": true` prevents accidental npm publishing. This file exists solely for changesets version tracking.
+
+**Naming the stubs:** `@collana-solutions/` plus the NuGet package ID in lowercase, with dots as dashes and nothing else changed: `Csag.MyLib` → `@collana-solutions/csag-mylib`, `Csag.Extensions.Caching.InMemory` → `@collana-solutions/csag-extensions-caching-inmemory`. That is the rule for the [preview feed](#feedzio-preview-feed-nuget) names as well. The name is part of every release tag and of the anchor gate in `nuget-publish.yml`, so a repo that has released keeps the stub names it has.
+
+> **Web SDK projects pack `package.json`.** In a project on `Microsoft.NET.Sdk.Web`, `package.json` is a `Content` item, so `dotnet pack` puts it into the package. Add `<Content Remove="package.json" />` to such a project. The **Verify packages** step of NuGet Publish fails on a package that contains one.
 
 Because every package here is private, `.changeset/config.json` **must** opt them back in. Changesets v3 skips private packages by default, and without this the whole setup goes quiet rather than failing:
 
@@ -988,7 +1029,7 @@ Both sub-options matter, and each fails differently:
 
 1. runs `pnpm exec changeset version`,
 2. writes each workspace package's new version into the `.csproj` in the same directory. It sets every `<Version>` property of an unconditioned top-level `PropertyGroup`, or adds one to the first such `PropertyGroup` (or to a new one at the start of the project). A `<Version>` anywhere else, for example inside a `PackageReference`, stays as it is. The script stops with an error before writing when a packed project sets `PackageVersion`, `VersionPrefix` or `VersionSuffix` in a `PropertyGroup`, or a `<Version>` with a `Condition` on itself or on its `PropertyGroup` (the package version has to come from an unconditioned `<Version>` alone), and after writing when the `.csproj` does not carry the new version,
-3. runs `dotnet restore --force-evaluate`. A `packages.lock.json` records the version of every project its project references, and neither a locked nor a plain restore notices when that version is out of date. Without references between the packed projects nothing changes in this step.
+3. runs `dotnet restore --force-evaluate`. A `packages.lock.json` records the version of every project its project references, and neither a locked nor a plain restore notices when that version is out of date. Without references between the packed projects nothing changes in this step. `changesets/action` runs the script with its App token in `GITHUB_TOKEN`, which the changelog generator needs. The restore runs without `GITHUB_TOKEN` and `GH_TOKEN` in its environment, because it can run MSBuild code from NuGet packages.
 
 The Version Packages PR therefore carries the `package.json`, `.csproj`, CHANGELOG and lock file changes together. The restore runs at the repository root, so it needs exactly one solution or project file there.
 
@@ -1014,7 +1055,7 @@ release published
 - **Symbols too.** `dotnet nuget push "./nupkgs/*.nupkg"` also pushes the `.snupkg` next to each `.nupkg` to the nuget.org symbol server, with the same key.
 - **Safe to repeat.** The concurrency group is on the `publish` job and named after the release tag, so runs for the same release wait for each other, and a release of another package or version never replaces a pending run. Pushes use `--skip-duplicate`. When only `publish` failed, **Re-run failed jobs** pushes the packages that `pack` uploaded, while the artifact exists. To publish an existing release again, for example after a failed push, run **NuGet Publish** from the Actions tab with the anchor package's release tag.
 
-> **Key detail:** `dotnet pack` leaves the `package.json` files out of the packages, and the **Verify packages** step fails if a `.nupkg` contains one. The workflow deletes no file, so a frontend or sample project with its own `package.json` still builds. Leave the generated `CHANGELOG.md` files alone: `changesets/action` reads the entry for the released version out of the `CHANGELOG.md` beside each tagged `package.json` to build the GitHub Release body, and errors if the file exists without a matching entry.
+> **Key detail:** `dotnet pack` leaves the `package.json` files out of the packages (projects on the Web SDK need `<Content Remove="package.json" />`, see [Repository structure](#repository-structure)), and the **Verify packages** step fails if a `.nupkg` contains one. The workflow deletes no file, so a frontend or sample project with its own `package.json` still builds. Leave the generated `CHANGELOG.md` files alone: `changesets/action` reads the entry for the released version out of the `CHANGELOG.md` beside each tagged `package.json` to build the GitHub Release body, and errors if the file exists without a matching entry.
 
 ### Trusted publishing on nuget.org
 
@@ -1094,7 +1135,7 @@ Everything documented in this guide works identically for NuGet repos:
 - CI blocks PRs without changesets
 - The Version Packages PR shows version bumps and changelog updates
 - Prereleases, backporting, and fixed packages all work the same
-- The differences are the version sync script, the `nuget-publish.yml` and `nuget-preview.yml` workflows, and the Dependabot detection paths above
+- The differences are the version sync script, the `nuget-publish.yml` and `nuget-preview.yml` workflows, the Dependabot detection paths above, and the second Changeset Check step for shared build files (see [Empty Changesets](#empty-changesets-non-releasable-changes))
 
 ---
 
@@ -1142,15 +1183,23 @@ The settings outside the repository files, in the order they are needed. Setting
 **Before the template PR, so its previews work:**
 
 - [ ] npm: install the [pkg.pr.new App](https://github.com/apps/pkg-pr-new) on the repository.
-- [ ] NuGet: create the feedz.io feed, named after the repository in lowercase with dots as dashes, readable without credentials, with a retention rule of 30 days. Set its URL as `FEED_URL` in `nuget-preview.yml`. See [Testing before release](#testing-before-release).
+- [ ] NuGet: create the feedz.io feed and set its URL as `FEED_URL` in `nuget-preview.yml`. See [Testing before release](#testing-before-release).
+  - **New repository**, named after the repository in lowercase with dots as dashes, with the visibility **Public** (the default is Private), so consumers restore without credentials.
+  - **Retention** → **New rule**: package ID **starts with** the repo's prefix (for example `Csag.`), pre-releases kept for **0** versions and **30** days. feedz.io keeps every version that meets either condition, so a version count above 0 would keep that many previews forever.
+
+**Right before merging the template PR:**
+
+- [ ] **Branch ruleset** for `main` and `release/**`: require a pull request and the status checks **Changeset Check**, the CI build check (**Verify** for npm, **Build, Test & Pack** for NuGet) and **zizmor**. An existing branch protection or ruleset still requires the old check names (for example `build` or `check-changelog`), which the template PR never reports, so it stays blocked. Swap them for the new checks once those have run on the PR, then merge without a bypass.
+- [ ] NuGet, when the template PR carries only an empty changeset: the environment `production` (below) and the [trust policy](#trusted-publishing-on-nugetorg) now, because the merge publishes right away (see [Moving a Package to a New Name](#moving-a-package-to-a-new-name)).
 
 **Right after the template PR is merged:**
 
 - [ ] **Environment `production`** (Settings → Environments), with deployment rules:
   - NuGet: tags `@collana-solutions/*` and the branch `main`. Releases run on tags, and a manual **NuGet Publish** runs from `main`.
   - npm: the branches `main` and `release/**`.
-- [ ] **Tag ruleset** for `@collana-solutions/*`: restrict creations, updates and deletions. Only the changesets App and repository admins may bypass it.
-- [ ] **Branch ruleset** for `main` and `release/**`: require a pull request and the status checks **Changeset Check**, the CI build check (**Verify** for npm, **Build, Test & Pack** for NuGet) and **zizmor**.
+- [ ] **Tag ruleset** for the release tags: restrict creations, updates and deletions. Only the changesets App and repository admins may bypass it.
+  - The pattern is `@collana-solutions/*`. A single-package npm repo tags `vX.Y.Z`, so there it is `v*`.
+  - Where an earlier release tool created tags without a prefix (`1.2.3`), add `[0-9]*` as well, so those stay protected too.
 - [ ] **"Require actions to be pinned to a full-length commit SHA"** (Settings → Actions → General). It also checks the actions that other actions use.
 - [ ] **Immutable releases** (Settings → General → Releases). A published release's tag can then no longer be moved or deleted. Deleting the release frees the tag, but its name can never be used again.
 
@@ -1365,7 +1414,7 @@ For a new organization, the setup is:
 
 Work through the [Per-repo setup checklist](#per-repo-setup-checklist): previews, the `production` environment, the rulesets, SHA pinning, immutable releases and the trust connection to the registry.
 
-> **Note:** A status check can be added to the branch ruleset only after it has run at least once, so add the rulesets after the first CI run on the template PR.
+> **Note:** A status check can be added to the branch ruleset only after it has run at least once, so set the required checks after the first CI run on the template PR, right before merging it. That also replaces the old required checks, which the template PR never reports.
 
 ### Step 8: Remove old release tooling
 
@@ -1438,7 +1487,7 @@ All files live in `.github/workflows/`. The Release workflow uses a **GitHub App
 
 ### Branch Protection
 
-Protect `main` and `release/**` with a **branch ruleset** (Settings → Rules → Rulesets) that requires a pull request and the status checks **Changeset Check**, the CI build check (**Verify** for npm, **Build, Test & Pack** for NuGet) and **zizmor**. The [Per-repo setup checklist](#per-repo-setup-checklist) lists it together with the tag ruleset and the other settings.
+Protect `main` and `release/**` with a **branch ruleset** (Settings → Rules → Rulesets) that requires a pull request and the status checks **Changeset Check**, the CI build check (**Verify** for npm, **Build, Test & Pack** for NuGet) and **zizmor**. In a repo that already requires other checks, swap them right before merging the template PR. The [Per-repo setup checklist](#per-repo-setup-checklist) lists it together with the tag ruleset and the other settings.
 
 ### Useful Commands
 

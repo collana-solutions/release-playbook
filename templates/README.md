@@ -77,7 +77,8 @@ their placeholders are listed here.
 | `.github/workflows/nuget-publish.yml`     | `@collana-solutions/YOUR-ANCHOR-PACKAGE` (the tag gate and the dispatch example) and `YOUR.ANCHOR.PACKAGE.ID` (`ANCHOR` in **Verify packages**, the NuGet ID of the anchor package).                                                                          |
 | `.github/workflows/nuget-preview.yml`     | `YOUR-FEED` → the feedz.io feed (the repository name in lowercase, dots as dashes). `YOUR-ANCHOR-PROJECT` → the anchor project's directory. `YOUR.PACKAGE.PREFIX.*` and `YOUR.ANCHOR.PACKAGE.ID` in the PR comment. The comment links to a "Preview packages" section of the README, so add one. |
 | `.github/workflows/refresh-lockfiles.yml` | The `packages/*/packages.lock.json` path in **Add changeset** → the lock files of the packed projects.                                                                                                                                                        |
-| `.github/workflows/ci.yml`                | **Test** uses the `GitHubActions` logger, which needs the `GitHubActionsTestLogger` package in every test project. Drop `--logger GitHubActions` otherwise. `YOUR-ANCHOR-PROJECT` in **Verify packed versions** → the anchor project's directory.                |
+| `.github/workflows/ci.yml`                | **Test** uses the `GitHubActions` logger, which needs the `GitHubActionsTestLogger` package in every test project. Drop `--logger GitHubActions` otherwise. `YOUR-ANCHOR-PROJECT` in **Verify packed versions** → the anchor project's directory. **Check for changesets on shared build files** covers `Directory.Build.props`, `Directory.Packages.props` and `global.json`. Add other files outside the package directories that the packages build from. |
+| `packages/*/package.json`                 | One private stub per packed project, named `@collana-solutions/` plus the NuGet ID in lowercase with dots as dashes (`Csag.Extensions.Caching.InMemory` → `@collana-solutions/csag-extensions-caching-inmemory`). A project on `Microsoft.NET.Sdk.Web` also needs `<Content Remove="package.json" />`, see [Repository structure](../docs/CHANGESETS.md#repository-structure). |
 | `Directory.Build.props`                   | Merge the [package metadata block](../docs/CHANGESETS.md#package-metadata) (project URL, symbols, Source Link, icon, `ContinuousIntegrationBuild`).                                                                                                          |
 
 The NuGet workflows expect a `global.json` that pins the .NET SDK, NuGet lock files
@@ -109,3 +110,33 @@ preview feed or App) is in the [Per-repo setup checklist](../docs/CHANGESETS.md#
 package, put it in a one-element `fixed` group (e.g. `[["@collana-solutions/my-pkg"]]`) so Dependabot
 updates get a real bump. The script **fails loudly** if a workspace package changed while no `fixed`
 group is configured, rather than silently emitting a no-op changeset.
+
+### npm, with the package at the repository root
+
+[next-with-google-secrets](https://github.com/collana-solutions/next-with-google-secrets) is the
+example. Compared with the template:
+
+- `pnpm-workspace.yaml` has no `packages` list.
+- `.github/dependabot.yml` uses `directory: "/"`, and the detect step in `dependabot-changeset.yml`
+  looks at `package.json` instead of `packages/*/package.json`.
+- `pkg.pr.new.yml` runs `pkg-pr-new publish --pnpm` without the `./packages/*` glob.
+- `refresh-lockfiles.yml` needs an **Add changeset** step right before **Generate App Token**. With
+  the package at the root, every changed file counts as a change to it, the refreshed lockfile too,
+  so the Changeset Check would fail the refresh PR. The script writes an empty changeset when
+  `WORKSPACE_PACKAGES_CHANGED` is not set:
+
+  ```yaml
+  - name: Add changeset
+    env:
+      PR_TITLE: "chore: refresh lockfiles (transitive dependency update)"
+    run: |
+      if [ -z "$(git status --porcelain)" ]; then
+        echo "The lockfile did not change, so no changeset is needed"
+        exit 0
+      fi
+      node scripts/generate-dependabot-changeset.mjs
+  ```
+
+- `engines.node` stays the package's own value, because the root manifest is the published one.
+- Release tags read `vX.Y.Z` instead of `@collana-solutions/<pkg>@X.Y.Z`, so the tag ruleset
+  pattern is `v*` (see the [Per-repo setup checklist](../docs/CHANGESETS.md#per-repo-setup-checklist)).
