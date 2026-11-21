@@ -59,12 +59,12 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
           SHARED_FILES: '(^|/)(Directory\.Build\.props|Directory\.Packages\.props|global\.json)$'
         run: |
-          shared=$(git diff --name-only "origin/$BASE_REF...HEAD" | grep -E "$SHARED_FILES" || true)
+          shared=$(git diff --name-only --no-renames "origin/$BASE_REF...HEAD" | grep -E "$SHARED_FILES" || true)
           if [ -z "$shared" ]; then
             echo "No shared build file changed"
             exit 0
           fi
-          changesets=$(git diff --name-only --diff-filter=AMR "origin/$BASE_REF...HEAD" -- .changeset | grep -E '^\.changeset/[^/]+\.md$' | grep -vx '.changeset/README.md' || true)
+          changesets=$(git diff --name-only --no-renames --diff-filter=AM "origin/$BASE_REF...HEAD" -- .changeset | grep -E '^\.changeset/[^/]+\.md$' | grep -vx '.changeset/README.md' || true)
           if [ -z "$changesets" ]; then
             echo "::error::This PR changes shared build files but adds no changeset. Run pnpm changeset, or pnpm changeset --empty if no package changes. Changed: ${shared//$'\n'/, }"
             exit 1
