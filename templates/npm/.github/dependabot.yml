@@ -29,9 +29,12 @@ updates:
       - '/packages/*'
     schedule:
       interval: 'weekly'
-    # 14 days, matching the minimumReleaseAge floor in pnpm-workspace.yaml.
+    # 14 days, matching the minimumReleaseAge floor in pnpm-workspace.yaml. Our own packages
+    # are exempt there, and here as well.
     cooldown:
       default-days: 14
+      exclude:
+        - '@collana-solutions/*'
     # Keeps Dependabot from needlessly narrowing peer and dependency ranges, which
     # matters for a library where a wide range is the point.
     versioning-strategy: increase-if-necessary
