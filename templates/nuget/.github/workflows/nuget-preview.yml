@@ -24,8 +24,8 @@ env:
   FEED_URL: https://f.feedz.io/collana-solutions/YOUR-FEED/nuget/index.json
 
 jobs:
-  publish:
-    name: Publish preview packages
+  pack:
+    name: Pack preview packages
     # Fork and Dependabot PRs don't get the FEEDZ_TOKEN secret.
     if: >-
       !github.event.pull_request.draft &&
@@ -34,7 +34,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -86,6 +87,35 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: dotnet pack --configuration Release --no-restore -p:Version="$VERSION" -o ./nupkgs
 
+      # The push runs in the publish job, which builds nothing, so no code from the build
+      # runs on the runner that gets FEEDZ_TOKEN.
+      - name: Upload packages
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: preview-nupkgs
+          path: |
+            ./nupkgs/*.nupkg
+            ./nupkgs/*.snupkg
+          retention-days: 1
+          if-no-files-found: error
+
+  # Only this job gets FEEDZ_TOKEN. It checks nothing out and builds nothing: it downloads
+  # what pack uploaded and pushes it. The runner image's .NET SDK provides dotnet nuget push.
+  publish:
+    name: Publish preview packages
+    needs: pack
+    runs-on: ubuntu-latest
+    # Downloading an artifact of the same run needs no GITHUB_TOKEN permission. The PR
+    # comment needs pull-requests: write.
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: preview-nupkgs
+          path: ./nupkgs
+
       # Each .snupkg next to its .nupkg goes to the feed's symbol endpoint.
       - name: Push to feedz.io
         env:
@@ -102,7 +132,7 @@ jobs:
       - name: Comment preview version
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.pack.outputs.version }}
         with:
           script: |
             const marker = '<!-- nuget-preview -->';
