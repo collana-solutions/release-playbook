@@ -16,3 +16,9 @@ minimumReleaseAge: 20160
 # offending versions to minimumReleaseAgeExclude by itself, which would let the scheduled
 # Refresh lockfiles job quietly bypass the policy it is supposed to respect.
 minimumReleaseAgeStrict: true
+
+# Our own packages skip the waiting period. They publish only through trusted publishing
+# or by a maintainer with 2FA, so a fresh version is not the unknown the floor guards against,
+# and a library that depends on another one of ours can take its release right away.
+minimumReleaseAgeExclude:
+  - '@collana-solutions/*'
