@@ -48,10 +48,11 @@ for (const { path: projDir, version } of workspacePackages) {
 // only a forced re-evaluation brings the lock files up to the new versions. Without
 // references between the packed projects nothing changes here.
 //
-// changesets/action runs this script with its App token in GITHUB_TOKEN, which the
-// changelog generator needs. The script also inherits the action's own environment:
-// its inputs (the same token as INPUT_GITHUB-TOKEN) and the Actions runtime token. A
-// restore can run MSBuild code from NuGet packages, so it runs without any of them.
+// The changelog generator needs GITHUB_TOKEN. A restore can run MSBuild code from NuGet
+// packages, so it runs without that token and without the other credentials a step can
+// hand down (action inputs, the Actions runtime and OIDC request tokens). Such code could
+// still read them from this process's environment, so the Release workflow runs this
+// script in a job whose GITHUB_TOKEN only reads and that has no App token.
 const credentials = /^(GITHUB_TOKEN|GH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN|INPUT_.*)$/i;
 const restoreEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => !credentials.test(name)));
 execSync("dotnet restore --force-evaluate", { stdio: "inherit", env: restoreEnv });
