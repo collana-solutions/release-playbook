@@ -37,7 +37,8 @@ npm/                                         nuget/
     └── generate-dependabot-changeset.mjs    └── scripts/
                                                  ├── build-dependency-snapshot.mjs
                                                  ├── generate-dependabot-changeset.mjs
-                                                 └── sync-versions.mjs
+                                                 ├── sync-versions.mjs
+                                                 └── version-changes.mjs
 ```
 
 `package.json` holds what the release setup needs in the root manifest. Merge it into an existing

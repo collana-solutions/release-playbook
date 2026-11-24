@@ -56,6 +56,7 @@ This is the collana-solutions guide for working with changesets. It covers **eve
     - [Architecture](#architecture)
     - [Repository structure](#repository-structure)
     - [Version sync script](#version-sync-script)
+    - [Release workflow](#release-workflow)
     - [NuGet publish workflow](#nuget-publish-workflow)
     - [Trusted publishing on nuget.org](#trusted-publishing-on-nugetorg)
     - [Package metadata](#package-metadata)
@@ -1025,17 +1026,44 @@ Both sub-options matter, and each fails differently:
 
 ### Version sync script
 
-`changeset version` only bumps the `package.json` files. [`scripts/sync-versions.mjs`](../templates/nuget/scripts/sync-versions.mjs) wraps it, and the Release workflow runs it as its `version-script`. The script:
+`changeset version` only bumps the `package.json` files. [`scripts/sync-versions.mjs`](../templates/nuget/scripts/sync-versions.mjs) wraps it, and the `prepare` job of the [Release workflow](#release-workflow) runs it. The script:
 
 1. runs `pnpm exec changeset version`,
 2. writes each workspace package's new version into the `.csproj` in the same directory. It sets every `<Version>` property of an unconditioned top-level `PropertyGroup`, or adds one to the first such `PropertyGroup` (or to a new one at the start of the project). A `<Version>` anywhere else, for example inside a `PackageReference`, stays as it is. The script stops with an error before writing when a packed project sets `PackageVersion`, `VersionPrefix` or `VersionSuffix` in a `PropertyGroup`, or a `<Version>` with a `Condition` on itself or on its `PropertyGroup` (the package version has to come from an unconditioned `<Version>` alone), and after writing when the `.csproj` does not carry the new version,
-3. runs `dotnet restore --force-evaluate`. A `packages.lock.json` records the version of every project its project references, and neither a locked nor a plain restore notices when that version is out of date. Without references between the packed projects nothing changes in this step. `changesets/action` runs the script with its App token in `GITHUB_TOKEN`, which the changelog generator needs. The script also inherits the action's own environment, which holds the same token as `INPUT_GITHUB-TOKEN` and the Actions runtime token. The restore runs without all of them (`GITHUB_TOKEN`, `GH_TOKEN`, every `INPUT_*` variable, `ACTIONS_RUNTIME_TOKEN` and `ACTIONS_ID_TOKEN_REQUEST_TOKEN`), because it can run MSBuild code from NuGet packages.
+3. runs `dotnet restore --force-evaluate`. A `packages.lock.json` records the version of every project its project references, and neither a locked nor a plain restore notices when that version is out of date. Without references between the packed projects nothing changes in this step. The changelog generator needs `GITHUB_TOKEN`, but the restore runs without it and without `GH_TOKEN`, every `INPUT_*` variable, `ACTIONS_RUNTIME_TOKEN` and `ACTIONS_ID_TOKEN_REQUEST_TOKEN`, because it can run MSBuild code from NuGet packages. Such code could still read them from the environment of the script itself, so the Release workflow runs the script in a job without the App token.
 
 The Version Packages PR therefore carries the `package.json`, `.csproj`, CHANGELOG and lock file changes together. The restore runs at the repository root, so it needs exactly one solution or project file there.
 
 The script only sees the `.csproj` files. MSBuild can still take the version from elsewhere, for example from a `Directory.Build.props`. CI's **Verify packed versions** step therefore checks the packed result on every PR: each `.nupkg` has to carry the version of the anchor package's `package.json`, so such an override fails the PR instead of NuGet Publish after the tags exist.
 
-`release.yml` is a single job. `changesets/action` runs with `version-script: node scripts/sync-versions.mjs` and `publish-script: pnpm exec changeset publish`. Nothing goes to npm: the packages are private, so `changeset publish` only creates the git tags, and the action creates one GitHub Release per tag. All of that is pushed with the App token, so the releases start NuGet Publish (a release created with `GITHUB_TOKEN` would start no workflow). No npm dist-tag is passed on `release/**` branches, so prereleases work there as well.
+### Release workflow
+
+[`release.yml`](../templates/nuget/.github/workflows/release.yml) runs on every push to `main` and `release/**`, in two jobs:
+
+```text
+push to main or release/**
+  prepare     contents: read, pull-requests: read   select mode, and while changesets are pending:
+                                                    version, sync, restore, upload version-changes
+    release   App token                             version PR from version-changes,
+                                                    or tags and GitHub Releases
+```
+
+- **`prepare`** sets aside the pending changesets when all of them are empty (see [Empty Changesets](#empty-changesets-non-releasable-changes)) and asks `changesets/action/select-mode` what the run does, which is the same test `changesets/action` makes in `release`. While changesets with releases are pending (mode `version`), it runs `scripts/sync-versions.mjs` and then the `collect` command of [`scripts/version-changes.mjs`](../templates/nuget/scripts/version-changes.mjs), which records every file the version step changed, added or deleted. The record goes up as the artifact `version-changes`, kept for one day. The changelog generator needs `GITHUB_TOKEN`, which can only read in this job.
+- **`release`** is the only job with the App token, and it runs no restore and no build. `changesets/action` runs with `version-script: node scripts/version-changes.mjs apply` and `publish-script: pnpm exec changeset publish`. While changesets are pending, the version script writes the downloaded changes into the checkout, and the action opens or updates the Version Packages PR with them: the branch `changeset-release/<branch>`, the title and commit message `chore: version packages`, and the body from the new CHANGELOG entries. Otherwise nothing goes to npm: the packages are private, so `changeset publish` only creates the git tags, and the action creates one GitHub Release per tag. All of that is pushed with the App token, so the releases start NuGet Publish (a release created with `GITHUB_TOKEN` would start no workflow). No npm dist-tag is passed on `release/**` branches, so prereleases work there as well.
+- **Why two jobs.** A restore can run MSBuild code from NuGet packages, for example an MSBuild project SDK resolved from NuGet. That code runs as the same user as everything else in its job and can read the environment of the other processes there, so leaving a token out of the restore's own environment does not keep it away. In `prepare`, such code can at most change the files of the version PR that the table below allows, and a maintainer reviews that PR before merging it. It never sees a token that can push, open a PR or create a release tag.
+- **What `apply` accepts.** The artifact comes from a job that ran dependency code, so `apply` trusts nothing in it and only writes and deletes files. Every change has to be one the version step makes, and nothing is written unless all of them are:
+
+  | Path                                                | Change              |
+  | --------------------------------------------------- | ------------------- |
+  | `.changeset/<name>.md`, except `README.md`          | deleted             |
+  | `.changeset/pre/<name>.md`                          | added or deleted    |
+  | `.changeset/pre.json`                               | modified or deleted |
+  | `<package>/package.json`, `<package>/<name>.csproj` | modified            |
+  | `<package>/CHANGELOG.md`                            | added or modified   |
+  | `packages.lock.json` in any directory               | modified            |
+
+  `<package>` is a directory below the repository root that holds a `package.json` in the checked-out commit. No path may contain `..`, `.git` or `node_modules`, or lead through or to a symbolic link, and the record has to be for the commit the run checked out. `collect` checks the same table, so an unexpected change fails `prepare` and names the file. `Directory.Build.props` and the other build files are not on the list: the version step never changes them, and they reach every build. A project that gets a new lock file needs it committed before the release, because `apply` adds none.
+- **Re-runs.** When only `release` failed, **Re-run failed jobs** applies the uploaded changes again while the artifact exists. After a day, re-run all jobs.
 
 ### NuGet publish workflow
 
@@ -1135,7 +1163,7 @@ Everything documented in this guide works identically for NuGet repos:
 - CI blocks PRs without changesets
 - The Version Packages PR shows version bumps and changelog updates
 - Prereleases, backporting, and fixed packages all work the same
-- The differences are the version sync script, the `nuget-publish.yml` and `nuget-preview.yml` workflows, the Dependabot detection paths above, and the second Changeset Check step for shared build files (see [Empty Changesets](#empty-changesets-non-releasable-changes))
+- The differences are the version sync script and the two jobs of the Release workflow around it, the `nuget-publish.yml` and `nuget-preview.yml` workflows, the Dependabot detection paths above, and the second Changeset Check step for shared build files (see [Empty Changesets](#empty-changesets-non-releasable-changes))
 
 ---
 
@@ -1164,6 +1192,7 @@ Both templates follow these rules, and so should every workflow an adopting repo
 - **App tokens with explicit permissions.** Every `actions/create-github-app-token` step lists `permission-*` inputs, for example `permission-contents: write`, so the token gets only those instead of everything the App may do.
 - **Publishing jobs run in the environment `production`,** whose deployment rules limit which refs reach the registry credential.
 - **The registry credential only in a job that runs no dependency code.** The install or restore, the build and, for NuGet, the tests run in a `pack` job without credentials, which uploads the packages. The `publish` job, the only one with `id-token: write`, publishes what `pack` uploaded: npm installs with `--ignore-scripts` and builds nothing, NuGet checks nothing out and only pushes. **NuGet Preview** keeps `FEEDZ_TOKEN` the same way, in a `publish` job that only downloads and pushes. The npm `backport` job is the one exception (see [Release job layout](#release-job-layout)).
+- **No restore next to the App token in the Release workflow.** Code that a NuGet restore runs can read the environment of every process in its job. The NuGet `prepare` job therefore versions and restores with a `GITHUB_TOKEN` that only reads and uploads the changed files. The `release` job, the only one with the App token, writes them after checking every path against the files a version bump touches (see [Release workflow](#release-workflow)). In the npm template the jobs with the App token run no dependency code beyond the changesets CLI, installed with `--ignore-scripts`, and the `backport` job is the exception there too.
 - **Waiting periods for new releases.** Dependabot waits 30 days for GitHub Actions and 14 days for npm and NuGet packages, pnpm refuses package versions younger than 14 days (`minimumReleaseAge: 20160` with `minimumReleaseAgeStrict: true`), and **Refresh lockfiles** re-resolves transitive dependencies once a month within those limits. Security updates skip the cooldown. Our own packages (`@collana-solutions/*` on npm, `Csag.*` on NuGet) are exempt from both waiting periods (`minimumReleaseAgeExclude` in `pnpm-workspace.yaml`, `exclude` in the Dependabot `cooldown`): they publish only through trusted publishing or by a maintainer with 2FA, and a library that depends on another of ours can take its release right away.
 
 Run zizmor locally before pushing. The `zizmor` job uses zizmor-action v0.7.1, which runs zizmor 1.31.1. `GH_TOKEN` enables the online audits, such as the check for action versions with known vulnerabilities:
@@ -1282,7 +1311,7 @@ Four behavior changes are worth knowing about:
 - The action no longer writes an `.npmrc` when `NPM_TOKEN` is set. Registry auth has to come from elsewhere: the npm template uses trusted publishing with a committed `.npmrc` (see [Publishing to public npm](#publishing-to-public-npm)), and a token-based setup uses `actions/setup-node`'s `registry-url` plus `NODE_AUTH_TOKEN`.
 - Published packages are no longer detected by scraping `changeset publish` stdout. The CLI writes them to the file named by the `CHANGESETS_OUTPUT` environment variable. A plain `publish-script: pnpm changeset publish` handles that itself, but a **wrapper script** has to pass `CHANGESETS_OUTPUT` through to the CLI it calls, otherwise the action merely warns, and skips the git tags and GitHub Releases.
 
-The v2 action also exposes sub-actions (`select-mode`, `version`, `pack`, `publish`, `pr-status`, `pr-comment`) so a release workflow can be split across jobs and grant `id-token: write` only where it publishes. The npm template uses them (see [Release job layout](#release-job-layout)). The single combined `changesets/action@v2` step, which the NuGet template and the npm `backport` job use, remains supported. Two notes if you go the sub-action route: pin the sub-actions to the same commit SHA as `changesets/action`, from `v2.1.0` or later (the `cwd` input was dropped in `v2.0.0` and restored in `v2.1.0`), and remember that `changesets/action/version` calls `changeset version` unconditionally, so it runs into the new exit-code-1 behavior on an empty release unless `select-mode` gates it.
+The v2 action also exposes sub-actions (`select-mode`, `version`, `pack`, `publish`, `pr-status`, `pr-comment`) so a release workflow can be split across jobs and grant `id-token: write` only where it publishes. The npm template uses them (see [Release job layout](#release-job-layout)), and the NuGet template runs `select-mode` in its `prepare` job (see [Release workflow](#release-workflow)). The single combined `changesets/action@v2` step, which the NuGet `release` job and the npm `backport` job use, remains supported. Two notes if you go the sub-action route: pin the sub-actions to the same commit SHA as `changesets/action`, from `v2.1.0` or later (the `cwd` input was dropped in `v2.0.0` and restored in `v2.1.0`), and remember that `changesets/action/version` calls `changeset version` unconditionally, so it runs into the new exit-code-1 behavior on an empty release unless `select-mode` gates it.
 
 ### Step 5: Update CLI commands and flags
 

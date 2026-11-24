@@ -4,6 +4,14 @@ name: Release
 # npm: every package.json is private and exists only so changesets can track a version.
 # The GitHub Release of the anchor package starts nuget-publish.yml, which pushes to
 # nuget.org.
+#
+# The work is split into two jobs. `prepare` decides what the run does. While changesets
+# are pending, it versions the packages, restores the solution to update the lock files and
+# uploads the changed files, with a GITHUB_TOKEN that only reads. `release` is the only job
+# with the App token. It runs no restore and no build: it applies the uploaded changes after
+# checking each one and opens or updates the version PR, or it tags the release. A restore
+# can run MSBuild code from NuGet packages, so code from the dependency tree never runs next
+# to the App token.
 on:
   push:
     branches:
@@ -15,11 +23,101 @@ concurrency: ${{ github.workflow }}-${{ github.ref }}
 permissions: {}
 
 jobs:
+  prepare:
+    name: Prepare version changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The changelog generator looks up the pull request and author of each changeset.
+      pull-requests: read
+    outputs:
+      mode: ${{ steps.select-mode.outputs.mode }}
+    steps:
+      # Full history, so changeset version finds the commit that added each changeset.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # No dependency cache in a release job: a cache written by another workflow must not feed a release.
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      # Activates the pnpm version pinned in package.json's "packageManager".
+      - name: Enable Corepack
+        run: corepack enable
+
+      # The root dependencies are the changesets CLI only, and nothing here needs an install script.
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # The same step as in the release job, so both jobs see the same pending changesets.
+      - name: Set aside empty-only changesets
+        run: |
+          shopt -s nullglob
+          pending=()
+          for f in .changeset/*.md; do
+            [ "$(basename "$f")" = README.md ] || pending+=("$f")
+          done
+          [ "${#pending[@]}" -eq 0 ] && exit 0
+          releases=$(awk '{ sub(/\r$/, "") } FNR == 1 { fm = ($0 == "---"); next } fm && $0 == "---" { fm = 0 } fm && NF { n++ } END { print n + 0 }' "${pending[@]}")
+          if [ "$releases" -eq 0 ]; then
+            echo "Only empty changesets are pending, setting aside: ${pending[*]}"
+            rm -- "${pending[@]}"
+          fi
+
+      # mode is `version` while changesets with releases are pending, which is the same test
+      # changesets/action makes in the release job before it versions. Otherwise nothing is
+      # prepared, and the release job tags what is not tagged yet.
+      - name: Select mode
+        id: select-mode
+        uses: changesets/action/select-mode@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+
+      # scripts/sync-versions.mjs restores the solution so that the version PR also
+      # updates the lock files.
+      - name: Setup .NET
+        if: steps.select-mode.outputs.mode == 'version'
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      # changeset version, the version sync into the .csproj files and the restore. The
+      # changelog generator needs GITHUB_TOKEN, which can only read in this job.
+      - name: Version packages
+        if: steps.select-mode.outputs.mode == 'version'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/sync-versions.mjs
+
+      # Records every file the version step changed, added or deleted. It fails on a change
+      # the release job would reject, so the run stops here and names the file.
+      - name: Collect version changes
+        if: steps.select-mode.outputs.mode == 'version'
+        env:
+          VERSION_CHANGES: ${{ runner.temp }}/version-changes/version-changes.json
+        run: node scripts/version-changes.mjs collect
+
+      # The release job runs right after this one. One day leaves time to re-run it alone.
+      - name: Upload version changes
+        if: steps.select-mode.outputs.mode == 'version'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: version-changes
+          path: ${{ runner.temp }}/version-changes/version-changes.json
+          retention-days: 1
+          if-no-files-found: error
+
   release:
     name: Release
+    needs: prepare
     runs-on: ubuntu-latest
     # Every write (version PR, release commit, tags, GitHub Releases, release branches) goes
-    # through the App token, so GITHUB_TOKEN only reads.
+    # through the App token, so GITHUB_TOKEN only reads. Downloading an artifact of the same
+    # run needs no permission.
     permissions:
       contents: read
     steps:
@@ -53,16 +151,10 @@ jobs:
       - name: Enable Corepack
         run: corepack enable
 
-      # The root dependencies are the changesets CLI only, and nothing here needs an install script.
+      # changeset publish, which creates the tags, runs from node_modules. Nothing here needs an
+      # install script.
       - name: Install Dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
-
-      # scripts/sync-versions.mjs restores the solution so that the version PR also
-      # updates the lock files.
-      - name: Setup .NET
-        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
-        with:
-          global-json-file: global.json
 
       # changesets/action does nothing while only empty changesets are pending, even when
       # package.json holds versions that are not released yet (src/index.ts in v2.1.2).
@@ -83,14 +175,27 @@ jobs:
             rm -- "${pending[@]}"
           fi
 
-      # The private packages are only tagged (privatePackages.tag in .changeset/config.json).
-      # No npm dist-tag is passed on release/** branches, because nothing goes to npm.
+      # Outside the checkout, so the version commit cannot pick up the file itself.
+      - name: Download version changes
+        if: needs.prepare.outputs.mode == 'version'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: version-changes
+          path: ${{ runner.temp }}/version-changes
+
+      # While changesets are pending, the version script only writes the changes the prepare
+      # job uploaded, after checking each one against the files a version bump touches, and
+      # the action commits them to the version PR. The private packages are only tagged
+      # (privatePackages.tag in .changeset/config.json). No npm dist-tag is passed on
+      # release/** branches, because nothing goes to npm.
       - name: Create Release Pull Request or Publish
         id: changesets
         uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+        env:
+          VERSION_CHANGES: ${{ runner.temp }}/version-changes/version-changes.json
         with:
           github-token: ${{ steps.app-token.outputs.token }}
-          version-script: node scripts/sync-versions.mjs
+          version-script: node scripts/version-changes.mjs apply
           publish-script: pnpm exec changeset publish
           pr-title: "chore: version packages"
           commit-message: "chore: version packages"
