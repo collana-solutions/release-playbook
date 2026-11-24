@@ -104,13 +104,14 @@ function readChanges(file) {
   return data;
 }
 
-// Paths are relative to the repository root, with forward slashes. Error messages quote
-// them with JSON.stringify, so a crafted path cannot put a workflow command at the start
-// of a log line.
+// Paths are relative to the repository root, with forward slashes. A colon is rejected as
+// well, because Windows reads C:/... as a path on that drive. Error messages quote paths
+// with JSON.stringify, so a crafted path cannot put a workflow command at the start of a
+// log line.
 function checkAllowed(file, change) {
   const segments = file.split("/");
   const plain =
-    !/[\u0000-\u001f\u007f\\]/.test(file) &&
+    !/[\u0000-\u001f\u007f\\:]/.test(file) &&
     !segments.some((s) => s === "" || s === "." || s === ".." || s.toLowerCase() === ".git" || s === "node_modules");
   if (!plain) throw new Error(`${JSON.stringify(file)} is not a plain path inside the repository`);
 
