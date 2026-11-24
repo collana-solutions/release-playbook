@@ -112,7 +112,7 @@ function checkAllowed(file, change) {
   const segments = file.split("/");
   const plain =
     !/[\u0000-\u001f\u007f\\:]/.test(file) &&
-    !segments.some((s) => s === "" || s === "." || s === ".." || s.toLowerCase() === ".git" || s === "node_modules");
+    !segments.some((s) => s === "" || s === "." || s === ".." || [".git", "node_modules"].includes(s.toLowerCase()));
   if (!plain) throw new Error(`${JSON.stringify(file)} is not a plain path inside the repository`);
 
   const allowed = allowedChanges(file);
@@ -150,14 +150,21 @@ function allowedChanges(file) {
 
 // No directory on the way may be a symbolic link. A modified or deleted file has to be a
 // regular file, and an added one must not exist yet.
+//
+// A case-insensitive filesystem gives one file several names (another casing, and on
+// Windows a short 8.3 name or a trailing dot), and each would pass the rules under a name
+// they never meant. The part of the path that exists therefore has to resolve to exactly
+// that path inside the checkout.
 function checkCheckout(file, change) {
   const segments = file.split("/");
+  let existing = "";
   for (let i = 1; i < segments.length; i++) {
     const dir = segments.slice(0, i).join("/");
     const stat = lstat(dir);
     if (stat && !stat.isDirectory()) {
       throw new Error(`${JSON.stringify(file)}: ${JSON.stringify(dir)} is not a directory`);
     }
+    if (stat) existing = dir;
   }
 
   const stat = lstat(file);
@@ -166,6 +173,15 @@ function checkCheckout(file, change) {
   }
   if (change !== "added" && !stat?.isFile()) {
     throw new Error(`${JSON.stringify(file)} is ${change}, but it is not a regular file in the checkout`);
+  }
+  if (stat) existing = file;
+
+  if (existing !== "") {
+    const root = fs.realpathSync.native(".");
+    const resolved = path.relative(root, fs.realpathSync.native(existing)).split(path.sep).join("/");
+    if (resolved !== existing) {
+      throw new Error(`${JSON.stringify(file)}: ${JSON.stringify(existing)} is ${JSON.stringify(resolved)} in the checkout`);
+    }
   }
 }
 

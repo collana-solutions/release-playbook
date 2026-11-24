@@ -1062,7 +1062,7 @@ push to main or release/**
   | `<package>/CHANGELOG.md`                            | added or modified   |
   | `packages.lock.json` in any directory               | modified            |
 
-  `<package>` is a directory below the repository root that holds a `package.json` in the checked-out commit. No path may contain `..`, `.git`, `node_modules`, a backslash or a colon, or lead through or to a symbolic link, and the record has to be for the commit the run checked out. `collect` checks the same table, so an unexpected change fails `prepare` and names the file. `Directory.Build.props` and the other build files are not on the list: the version step never changes them, and they reach every build. A project that gets a new lock file needs it committed before the release, because `apply` adds none.
+  `<package>` is a directory below the repository root that holds a `package.json` in the checked-out commit. No path may contain `..`, `.git`, `node_modules`, a backslash or a colon, or lead through or to a symbolic link. The part of a path that exists has to resolve to exactly that path, so another casing or a short name of an existing file fails as well. The record has to be for the commit the run checked out. `collect` checks the same table, so an unexpected change fails `prepare` and names the file. `Directory.Build.props` and the other build files are not on the list: the version step never changes them, and they reach every build. A project that gets a new lock file needs it committed before the release, because `apply` adds none.
 - **Re-runs.** When only `release` failed, **Re-run failed jobs** applies the uploaded changes again while the artifact exists. After a day, re-run all jobs.
 
 ### NuGet publish workflow
